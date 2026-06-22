@@ -1,17 +1,18 @@
 // Command soundboard is a Windows 11 system-tray soundboard that mixes
-// bundled sound clips over your live microphone via the VB-CABLE virtual audio
-// cable, so anyone in Discord (or any voice app) hears them as if you spoke.
+// sound clips over your live microphone via the VB-CABLE virtual audio cable,
+// so anyone in Discord (or any voice app) hears them as if you spoke.
 //
-// The embed of the sounds/ tree MUST live at the repo root, because go:embed
-// cannot reference parent directories ("..").
+// Sounds are NOT embedded in the binary. The app is plug-and-play: at launch it
+// reads the sounds/ folder that sits next to the executable, so you can drop new
+// clips into sounds/<category>/ and relaunch — no rebuild required.
 package main
 
 import (
-	"embed"
 	"io"
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/gen2brain/malgo"
 
@@ -23,9 +24,6 @@ import (
 	"soundboard/internal/tray"
 	"soundboard/internal/wizard"
 )
-
-//go:embed all:sounds
-var soundsFS embed.FS
 
 func main() {
 	// Route diagnostics to a log file under the config dir. The shipping build
@@ -44,18 +42,22 @@ func main() {
 		log.Fatalf("load settings: %v", err)
 	}
 
-	// Catalog: walk the embedded sounds/ tree and decode all clips.
-	sub, err := fs.Sub(soundsFS, ".")
+	// Catalog: load clips from the sounds/ folder next to the executable at
+	// runtime (plug-and-play — nothing is embedded in the binary).
+	root, base := soundsRoot()
+	soundsDir := filepath.Join(base, "sounds")
+	lib, err := catalog.New(root)
 	if err != nil {
-		log.Fatalf("sub fs: %v", err)
-	}
-	lib, err := catalog.New(sub)
-	if err != nil {
-		log.Fatalf("build library: %v", err)
+		log.Fatalf("build library from %s: %v", soundsDir, err)
 	}
 	if err := lib.Load(); err != nil {
-		log.Fatalf("decode library: %v", err)
+		log.Fatalf("decode library from %s: %v", soundsDir, err)
 	}
+	var clipCount int
+	for _, c := range lib.Categories {
+		clipCount += len(c.Clips)
+	}
+	log.Printf("library: %d categories, %d clips loaded from %s", len(lib.Categories), clipCount, soundsDir)
 
 	// Audio context (WASAPI first, DirectSound fallback).
 	ctx, err := malgo.InitContext(
@@ -170,6 +172,33 @@ func main() {
 		}
 	})
 	ui.Run(func() {})
+}
+
+// soundsRoot locates the directory that contains the sounds/ folder and returns
+// an fs.FS rooted there plus the chosen base path. It prefers the directory of
+// the running executable (so a shipped soundboard.exe + sounds/ folder work
+// regardless of the working directory), then the current working directory. If
+// no sounds/ exists yet, it creates an empty one next to the exe so first run is
+// clean and the user can drop clips in.
+func soundsRoot() (fs.FS, string) {
+	var bases []string
+	if exe, err := os.Executable(); err == nil {
+		bases = append(bases, filepath.Dir(exe))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		bases = append(bases, wd)
+	}
+	for _, b := range bases {
+		if st, err := os.Stat(filepath.Join(b, "sounds")); err == nil && st.IsDir() {
+			return os.DirFS(b), b
+		}
+	}
+	base := "."
+	if len(bases) > 0 {
+		base = bases[0]
+	}
+	_ = os.MkdirAll(filepath.Join(base, "sounds"), 0o755)
+	return os.DirFS(base), base
 }
 
 func resolveMic(capture []devices.Device, name string) (devices.Device, bool) {
