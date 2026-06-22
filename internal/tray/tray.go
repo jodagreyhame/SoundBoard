@@ -5,9 +5,7 @@ package tray
 import (
 	_ "embed"
 
-	// The tray UI is built on energye/systray; Run() wraps systray.Run.
-	// Imported here so the module pins it.
-	_ "github.com/energye/systray"
+	"github.com/energye/systray"
 
 	"soundboard/internal/catalog"
 )
@@ -35,18 +33,21 @@ type UI struct {
 
 // New creates a tray UI bound to the library and player.
 func New(lib *catalog.Library, player Player) *UI {
-	panic("todo")
+	return &UI{
+		lib:    lib,
+		player: player,
+	}
 }
 
 // OnMonitorToggle registers the callback fired when the user toggles the
 // monitor menu item (true = enabled).
 func (u *UI) OnMonitorToggle(fn func(bool)) {
-	panic("todo")
+	u.onMonitorToggle = fn
 }
 
 // OnQuit registers the callback fired when the user selects Quit.
 func (u *UI) OnQuit(fn func()) {
-	panic("todo")
+	u.onQuit = fn
 }
 
 // Run wraps systray.Run: it builds category submenus from lib.Categories
@@ -54,5 +55,72 @@ func (u *UI) OnQuit(fn func()) {
 // player.Trigger(clip.ID)), plus a Monitor toggle and Quit. onReady is invoked
 // once the tray is initialized. This blocks until the tray exits.
 func (u *UI) Run(onReady func()) {
-	panic("todo")
+	systray.Run(u.build(onReady), u.onExit)
 }
+
+// build returns the systray onReady closure that constructs the whole menu.
+func (u *UI) build(onReady func()) func() {
+	return func() {
+		systray.SetIcon(iconICO)
+		systray.SetTitle("SoundBoard")
+		systray.SetTooltip("SoundBoard")
+
+		// One top-level menu item per category; one sub-item per clip.
+		if u.lib != nil {
+			for i := range u.lib.Categories {
+				cat := &u.lib.Categories[i]
+				catItem := systray.AddMenuItem(cat.Name, cat.Name)
+				for _, clip := range cat.Clips {
+					clip := clip // capture per-iteration for the closure
+					item := catItem.AddSubMenuItem(clip.Name, clip.ID)
+					item.Click(func() {
+						if u.player != nil {
+							u.player.Trigger(clip.ID)
+						}
+					})
+				}
+			}
+		}
+
+		systray.AddSeparator()
+
+		// Monitor toggle: lets the user hear triggered sounds locally.
+		monitor := systray.AddMenuItemCheckbox(
+			"Monitor (hear sounds yourself)",
+			"Play triggered sounds through your own output too",
+			false,
+		)
+		monitor.Click(func() {
+			var enabled bool
+			if monitor.Checked() {
+				monitor.Uncheck()
+				enabled = false
+			} else {
+				monitor.Check()
+				enabled = true
+			}
+			if u.onMonitorToggle != nil {
+				u.onMonitorToggle(enabled)
+			}
+		})
+
+		systray.AddSeparator()
+
+		// Quit: invoke the user callback, then tear down the tray.
+		quit := systray.AddMenuItem("Quit", "Exit SoundBoard")
+		quit.Click(func() {
+			if u.onQuit != nil {
+				u.onQuit()
+			}
+			systray.Quit()
+		})
+
+		if onReady != nil {
+			onReady()
+		}
+	}
+}
+
+// onExit runs when the systray event loop terminates. The quit callback already
+// fired on the Quit click; this is a no-op kept as the explicit exit hook.
+func (u *UI) onExit() {}

@@ -15,7 +15,12 @@ type Status struct {
 // Check inspects enumerated playback/capture devices for the CABLE Input
 // (playback) and CABLE Output (capture) endpoints.
 func Check(playback, capture []devices.Device) Status {
-	panic("todo")
+	_, inputPresent := devices.FindCableInput(playback)
+	_, outputPresent := devices.FindCableOutput(capture)
+	return Status{
+		CableInputPresent:  inputPresent,
+		CableOutputPresent: outputPresent,
+	}
 }
 
 // DownloadURL returns the VB-CABLE download page.
