@@ -13,6 +13,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/gopxl/beep/v2"
 	"github.com/gopxl/beep/v2/flac"
@@ -47,12 +48,16 @@ type Category struct {
 	Clips []*Clip
 }
 
-// Library is the in-memory catalog of all embedded clips.
+// Library is the in-memory catalog of all clips found under the sounds/ folder.
 type Library struct {
 	Categories []Category
 	byID       map[string]*Clip
 
 	fsys fs.FS
+
+	// decMu guards lazy decode (EnsureDecoded). Decoding happens off the
+	// real-time audio path, on whatever goroutine triggers a clip.
+	decMu sync.Mutex
 }
 
 // supported maps a lowercase file extension (with dot) to whether catalog can
@@ -134,8 +139,30 @@ func New(fsys fs.FS) (*Library, error) {
 	return l, nil
 }
 
-// Load decodes every clip to float32/48k/2ch, resampling at load time, and
-// fills each Clip.PCM. mp3 via go-mp3; wav/flac/ogg via beep/v2/{wav,flac,vorbis}.
+// EnsureDecoded decodes and caches a clip's PCM on first use and returns it.
+// Subsequent calls return the cached PCM. It is safe for concurrent callers and
+// MUST NOT be called from the real-time audio callback — call it from the
+// (non-RT) goroutine that triggers a clip, before handing the clip to the
+// engine. Decoding the whole library up front is avoided so startup is instant
+// and idle memory stays proportional to the clips actually played.
+func (l *Library) EnsureDecoded(clip *Clip) ([]float32, error) {
+	l.decMu.Lock()
+	defer l.decMu.Unlock()
+	if clip.PCM != nil {
+		return clip.PCM, nil
+	}
+	pcm, err := l.decodeClip(clip)
+	if err != nil {
+		return nil, fmt.Errorf("catalog: decode %q: %w", clip.Path, err)
+	}
+	clip.PCM = pcm
+	return pcm, nil
+}
+
+// Load eagerly decodes every clip to float32/48k/2ch (resampling at load time)
+// and fills each Clip.PCM. It is optional — the app decodes lazily via
+// EnsureDecoded — but is kept for callers/tests that want everything in memory.
+// mp3 via go-mp3; wav/flac/ogg via beep/v2/{wav,flac,vorbis}.
 func (l *Library) Load() error {
 	for _, cat := range l.Categories {
 		for _, clip := range cat.Clips {

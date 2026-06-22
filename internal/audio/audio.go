@@ -288,7 +288,13 @@ func (e *Engine) Stop() error {
 // Implements tray.Player.
 func (e *Engine) Trigger(id string) {
 	clip := e.lib.Get(id)
-	if clip == nil || len(clip.PCM) == 0 {
+	if clip == nil {
+		return
+	}
+	// Decode on first play (off the RT path, on this goroutine). EnsureDecoded
+	// fully populates clip.PCM before we hand the clip to a callback over the
+	// channel, so the callback's later read is safely published via the channel.
+	if _, err := e.lib.EnsureDecoded(clip); err != nil || len(clip.PCM) == 0 {
 		return
 	}
 	select {

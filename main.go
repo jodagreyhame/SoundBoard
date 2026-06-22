@@ -22,6 +22,7 @@ import (
 	"soundboard/internal/devices"
 	"soundboard/internal/hotkeys"
 	"soundboard/internal/tray"
+	"soundboard/internal/winui"
 	"soundboard/internal/wizard"
 )
 
@@ -50,14 +51,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("build library from %s: %v", soundsDir, err)
 	}
-	if err := lib.Load(); err != nil {
-		log.Fatalf("decode library from %s: %v", soundsDir, err)
-	}
+	// Clips are decoded lazily on first play (catalog.EnsureDecoded), so startup
+	// is instant and idle memory stays low regardless of how big the library is.
 	var clipCount int
 	for _, c := range lib.Categories {
 		clipCount += len(c.Clips)
 	}
-	log.Printf("library: %d categories, %d clips loaded from %s", len(lib.Categories), clipCount, soundsDir)
+	log.Printf("library: %d categories, %d clips indexed from %s (decoded on demand)", len(lib.Categories), clipCount, soundsDir)
 
 	// Audio context (WASAPI first, DirectSound fallback).
 	ctx, err := malgo.InitContext(
@@ -142,6 +142,18 @@ func main() {
 
 	// Tray UI (blocks until quit).
 	ui := tray.New(lib, engine)
+
+	// Setup section: open the VB-CABLE download page, or show the Discord steps.
+	ui.SetSetup(
+		status.CableInputPresent,
+		func() {
+			if err := winui.OpenURL(wizard.DownloadURL()); err != nil {
+				log.Printf("open download page: %v", err)
+			}
+		},
+		func() { winui.Info("SoundBoard — Discord setup", wizard.DiscordChecklist()) },
+	)
+
 	// The checkbox reflects the engine's actual monitor state at launch.
 	ui.SetMonitorInitialState(engineRunning && settings.Monitor && settings.MonitorName != "")
 	ui.OnMonitorToggle(func(on bool) {
@@ -171,7 +183,27 @@ func main() {
 			log.Printf("save settings: %v", err)
 		}
 	})
-	ui.Run(func() {})
+
+	// On launch, if VB-CABLE is missing the app can't route audio yet. Pop a
+	// visible setup dialog (non-blocking, so the tray still appears) offering to
+	// open the download page. Runs once the tray is ready.
+	ui.Run(func() {
+		if status.CableInputPresent {
+			return
+		}
+		go func() {
+			msg := "SoundBoard plays sounds over your microphone using VB-CABLE, " +
+				"but VB-CABLE isn't installed yet.\n\n" +
+				"Click Yes to open the download page. Install it (needs admin + a reboot), " +
+				"then restart SoundBoard.\n\n" +
+				"After installing:\n" + wizard.DiscordChecklist()
+			if winui.Confirm("SoundBoard — setup needed", msg) {
+				if err := winui.OpenURL(wizard.DownloadURL()); err != nil {
+					log.Printf("open download page: %v", err)
+				}
+			}
+		}()
+	})
 }
 
 // soundsRoot locates the directory that contains the sounds/ folder and returns

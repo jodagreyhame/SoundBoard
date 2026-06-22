@@ -29,6 +29,10 @@ type UI struct {
 
 	monitorInitiallyOn bool
 
+	cableReady     bool
+	onInstallCable func()
+	onDiscordSteps func()
+
 	onMonitorToggle func(bool)
 	onQuit          func()
 }
@@ -47,6 +51,15 @@ func New(lib *catalog.Library, player Player) *UI {
 // with monitoring on, forcing a double-click to actually turn it off.
 func (u *UI) SetMonitorInitialState(on bool) {
 	u.monitorInitiallyOn = on
+}
+
+// SetSetup configures the always-visible Setup section. cableReady controls the
+// status line; onInstall opens the VB-CABLE download page; onSteps shows the
+// Discord configuration steps.
+func (u *UI) SetSetup(cableReady bool, onInstall, onSteps func()) {
+	u.cableReady = cableReady
+	u.onInstallCable = onInstall
+	u.onDiscordSteps = onSteps
 }
 
 // OnMonitorToggle registers the callback fired when the user toggles the
@@ -74,6 +87,32 @@ func (u *UI) build(onReady func()) func() {
 		systray.SetIcon(iconICO)
 		systray.SetTitle("SoundBoard")
 		systray.SetTooltip("SoundBoard")
+
+		// Setup section (always visible). Audio routing requires VB-CABLE plus a
+		// one-time Discord configuration, so surface both right at the top with a
+		// clear status line and clickable actions.
+		statusLabel := "✓ VB-CABLE detected"
+		if !u.cableReady {
+			statusLabel = "⚠ VB-CABLE NOT detected — click 'Install VB-CABLE' below"
+		}
+		status := systray.AddMenuItem(statusLabel, "Sound is sent over your mic through VB-CABLE")
+		status.Disable()
+
+		install := systray.AddMenuItem("Install VB-CABLE (open download)…", "Open https://vb-audio.com/Cable/ in your browser")
+		install.Click(func() {
+			if u.onInstallCable != nil {
+				u.onInstallCable()
+			}
+		})
+
+		steps := systray.AddMenuItem("Discord setup steps…", "Show the exact Discord Voice settings to use")
+		steps.Click(func() {
+			if u.onDiscordSteps != nil {
+				u.onDiscordSteps()
+			}
+		})
+
+		systray.AddSeparator()
 
 		// One top-level menu item per category; one sub-item per clip.
 		if u.lib != nil {
