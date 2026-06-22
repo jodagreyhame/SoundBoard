@@ -18,6 +18,7 @@ package audio
 
 import (
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -53,13 +54,43 @@ const (
 // clipCursor tracks playback position of one active clip instance. Multiple
 // cursors over the same clip allow overlap. pos is a sample index into the
 // interleaved pcm (advances by `channels` per frame).
+//
+// gain is the linear amplitude applied to this cursor's samples on top of the
+// fade ramp. It is captured at Trigger time (per-clip volume * master volume)
+// so each overlapping instance can be scaled independently. The ZERO value is
+// treated as unity (1.0) by gainOf so cursors constructed without an explicit
+// gain — including those in the existing mix tests — play at full level; a
+// genuinely silent clip is never triggered.
 type clipCursor struct {
-	pcm []float32
-	pos int
+	pcm  []float32
+	pos  int
+	gain float32
 }
 
 // done reports whether the cursor has played all of its samples.
 func (c *clipCursor) done() bool { return c.pos >= len(c.pcm) }
+
+// gainOf returns the effective per-cursor gain, mapping the zero value to unity
+// so cursors created without an explicit gain are not silenced.
+func gainOf(c *clipCursor) float32 {
+	if c.gain == 0 {
+		return 1
+	}
+	return c.gain
+}
+
+// pendingClip is the unit handed from Trigger to an RT callback: the decoded
+// clip plus the per-instance gain (per-clip volume * master) captured at trigger
+// time. Carrying the gain on the handoff keeps the RT callback from reading any
+// shared per-clip volume map.
+type pendingClip struct {
+	clip *catalog.Clip
+	gain float32
+}
+
+// float32bits / float32frombits store a float32 in an atomic.Uint32.
+func float32bits(f float32) uint32  { return math.Float32bits(f) }
+func float32frombits(u uint32) float32 { return math.Float32frombits(u) }
 
 // Engine owns the duplex device, the optional monitor device, and the active
 // cursor lists. Each device has its OWN cursor list (independent clocks).
@@ -90,11 +121,18 @@ type Engine struct {
 	// contends with the lifecycle lock.
 	monitorActive atomic.Bool
 
+	// micGainBits / masterGainBits hold the live mic-passthrough gain and the
+	// soundboard master gain as float32 bit patterns. They are written by the
+	// UI thread (SetMicGain / SetMasterGain) and read lock-free by the RT
+	// callback, so volume changes take effect without touching ctrlMu.
+	micGainBits    atomic.Uint32
+	masterGainBits atomic.Uint32
+
 	// pending / monPending hand clips from Trigger to the RT callbacks. Each
 	// callback drains its own channel; the slices below are touched only by
 	// their owning callback.
-	pending    chan *catalog.Clip
-	monPending chan *catalog.Clip
+	pending    chan pendingClip
+	monPending chan pendingClip
 
 	// cursors / monCursors are owned exclusively by their RT callback.
 	cursors    []*clipCursor // duplex (mic+SFX) device cursors
@@ -102,14 +140,42 @@ type Engine struct {
 }
 
 // NewEngine creates an engine bound to a context and the decoded library.
+// Mic and master gains both default to unity (1.0).
 func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
-	return &Engine{
+	e := &Engine{
 		ctx:        ctx,
 		lib:        lib,
-		pending:    make(chan *catalog.Clip, pendingCap),
-		monPending: make(chan *catalog.Clip, pendingCap),
+		pending:    make(chan pendingClip, pendingCap),
+		monPending: make(chan pendingClip, pendingCap),
 	}
+	e.micGainBits.Store(float32bits(1))
+	e.masterGainBits.Store(float32bits(1))
+	return e
 }
+
+// SetMicGain sets the live mic-passthrough gain (linear, 1.0 = unchanged).
+// Negative values are clamped to 0. Safe to call from any goroutine; the RT
+// callback picks the new value up on its next buffer.
+func (e *Engine) SetMicGain(g float32) {
+	if g < 0 {
+		g = 0
+	}
+	e.micGainBits.Store(float32bits(g))
+}
+
+// SetMasterGain sets the soundboard master gain (linear, 1.0 = unchanged)
+// applied to every clip on top of its per-clip volume. Negative values are
+// clamped to 0. Safe to call from any goroutine.
+func (e *Engine) SetMasterGain(g float32) {
+	if g < 0 {
+		g = 0
+	}
+	e.masterGainBits.Store(float32bits(g))
+}
+
+// micGain / masterGain read the current gains lock-free.
+func (e *Engine) micGain() float32    { return float32frombits(e.micGainBits.Load()) }
+func (e *Engine) masterGain() float32 { return float32frombits(e.masterGainBits.Load()) }
 
 // Configure sets up the malgo DUPLEX device: Capture=mic, Playback=cable,
 // FormatF32, 48k, 2ch, small period (128-256 frames). It does not start it.
@@ -280,13 +346,18 @@ func (e *Engine) Stop() error {
 	return nil
 }
 
-// Trigger looks up the clip by ID and hands it to the RT callbacks over the
-// pending channels, allowing overlap. Both the duplex and (if active) monitor
-// devices get their OWN cursor instance so their independent clocks never share
-// state. The handoff is non-blocking: if a queue is somehow full, the extra
-// trigger is dropped rather than blocking this (non-RT) goroutine.
-// Implements tray.Player.
-func (e *Engine) Trigger(id string) {
+// Trigger plays the clip at unit per-clip gain (scaled only by the master gain).
+// It is shorthand for TriggerGain(id, 1). Implements the ui.Player default path.
+func (e *Engine) Trigger(id string) { e.TriggerGain(id, 1) }
+
+// TriggerGain looks up the clip by ID and hands it to the RT callbacks over the
+// pending channels with a per-instance gain of gain*master captured now, so
+// later master/per-clip changes do not retroactively alter sounds already in
+// flight. Both the duplex and (if active) monitor devices get their OWN cursor
+// instance so their independent clocks never share state. The handoff is
+// non-blocking: if a queue is somehow full, the extra trigger is dropped rather
+// than blocking this (non-RT) goroutine. Implements ui.Player.
+func (e *Engine) TriggerGain(id string, gain float32) {
 	clip := e.lib.Get(id)
 	if clip == nil {
 		return
@@ -297,13 +368,17 @@ func (e *Engine) Trigger(id string) {
 	if _, err := e.lib.EnsureDecoded(clip); err != nil || len(clip.PCM) == 0 {
 		return
 	}
+	if gain < 0 {
+		gain = 0
+	}
+	pc := pendingClip{clip: clip, gain: gain * e.masterGain()}
 	select {
-	case e.pending <- clip:
+	case e.pending <- pc:
 	default:
 	}
 	if e.monitorActive.Load() {
 		select {
-		case e.monPending <- clip:
+		case e.monPending <- pc:
 		default:
 		}
 	}
@@ -321,6 +396,14 @@ func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	n := int(frameCount) * channels
 	if n > len(out) {
 		n = len(out)
+	}
+	// Apply the live mic-passthrough gain in place on the input view before
+	// mixing. miniaudio hands us a fresh input buffer each call, so scaling it
+	// here is safe and allocation-free. Skip the loop at unity to stay cheap.
+	if g := e.micGain(); g != 1 {
+		for i := range mic {
+			mic[i] *= g
+		}
 	}
 	e.cursors = mixInto(out[:n], mic, e.cursors)
 }
@@ -343,11 +426,11 @@ func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 // for each onto cursors, returning the grown slice. It blocks on nothing (a
 // non-blocking select loop). Any append growth happens on the callback's own
 // slice, never under a lock shared with the producer.
-func drainInto(ch <-chan *catalog.Clip, cursors []*clipCursor) []*clipCursor {
+func drainInto(ch <-chan pendingClip, cursors []*clipCursor) []*clipCursor {
 	for {
 		select {
-		case clip := <-ch:
-			cursors = append(cursors, &clipCursor{pcm: clip.PCM})
+		case pc := <-ch:
+			cursors = append(cursors, &clipCursor{pcm: pc.clip.PCM, gain: pc.gain})
 		default:
 			return cursors
 		}
@@ -356,7 +439,7 @@ func drainInto(ch <-chan *catalog.Clip, cursors []*clipCursor) []*clipCursor {
 
 // drainPending empties a pending channel without consuming into cursors. Used
 // when a device is being torn down or reconfigured.
-func drainPending(ch chan *catalog.Clip) {
+func drainPending(ch chan pendingClip) {
 	for {
 		select {
 		case <-ch:
@@ -388,11 +471,12 @@ func mixInto(out, mic []float32, cursors []*clipCursor) []*clipCursor {
 	frames := len(out) / channels
 
 	for _, c := range cursors {
+		cg := gainOf(c)
 		for f := 0; f < frames; f++ {
 			if c.done() {
 				break
 			}
-			g := fadeGain(c.pos, len(c.pcm))
+			g := fadeGain(c.pos, len(c.pcm)) * cg
 			base := f * channels
 			for ch := 0; ch < channels; ch++ {
 				if c.pos >= len(c.pcm) {

@@ -1,10 +1,21 @@
-// Command soundboard is a Windows 11 system-tray soundboard that mixes
-// sound clips over your live microphone via the VB-CABLE virtual audio cable,
-// so anyone in Discord (or any voice app) hears them as if you spoke.
+// Command soundboard is a Windows 11 soundboard that mixes sound clips over
+// your live microphone via the VB-CABLE virtual audio cable, so anyone in
+// Discord (or any voice app) hears them as if you spoke.
 //
-// Sounds are NOT embedded in the binary. The app is plug-and-play: at launch it
-// reads the sounds/ folder that sits next to the executable, so you can drop new
-// clips into sounds/<category>/ and relaunch — no rebuild required.
+// v2 architecture:
+//   - UI is a Fyne main window with a clip browser and volume sliders, plus a
+//     Fyne system-tray icon; closing the window hides it to the tray.
+//   - The malgo duplex engine captures the user's REAL mic and mixes the
+//     soundboard into CABLE Input. Software gains (mic, master, per-clip) are
+//     applied in the real-time callback.
+//   - Auto-route (internal/setup) detects VB-CABLE, offers a one-click install,
+//     and makes Discord need ZERO changes by setting the Windows default
+//     recording endpoint to "CABLE Output" while SoundBoard runs (restored on
+//     quit). The engine still captures the previous default mic, not the cable.
+//
+// Sounds are NOT embedded: at launch the app reads the sounds/ folder next to
+// the executable, so dropping new clips into sounds/<category>/ and relaunching
+// needs no rebuild.
 package main
 
 import (
@@ -21,9 +32,8 @@ import (
 	"soundboard/internal/config"
 	"soundboard/internal/devices"
 	"soundboard/internal/hotkeys"
-	"soundboard/internal/tray"
-	"soundboard/internal/winui"
-	"soundboard/internal/wizard"
+	"soundboard/internal/setup"
+	"soundboard/internal/ui"
 )
 
 func main() {
@@ -44,15 +54,14 @@ func main() {
 	}
 
 	// Catalog: load clips from the sounds/ folder next to the executable at
-	// runtime (plug-and-play — nothing is embedded in the binary).
+	// runtime (plug-and-play — nothing is embedded in the binary). Clips decode
+	// lazily on first play, so startup is instant.
 	root, base := soundsRoot()
 	soundsDir := filepath.Join(base, "sounds")
 	lib, err := catalog.New(root)
 	if err != nil {
 		log.Fatalf("build library from %s: %v", soundsDir, err)
 	}
-	// Clips are decoded lazily on first play (catalog.EnsureDecoded), so startup
-	// is instant and idle memory stays low regardless of how big the library is.
 	var clipCount int
 	for _, c := range lib.Categories {
 		clipCount += len(c.Clips)
@@ -73,62 +82,48 @@ func main() {
 		ctx.Free()
 	}()
 
-	// Enumerate devices and resolve the mic + cable endpoints.
+	// Enumerate devices and detect the VB-CABLE endpoints.
 	playback, capture, err := devices.Enumerate(ctx)
 	if err != nil {
 		log.Fatalf("enumerate devices: %v", err)
 	}
-
-	status := wizard.Check(playback, capture)
+	status := setup.Detect(playback, capture)
 	if !status.CableInputPresent {
-		log.Printf("VB-CABLE not detected. Download: %s", wizard.DownloadURL())
-		log.Print(wizard.DiscordChecklist())
+		log.Printf("VB-CABLE not detected. Install from %s", setup.DownloadURL())
 	}
 
+	// Resolve the REAL mic to capture and the cable to play into. The engine
+	// captures the user's previous default mic (PreviousDefaultMic once routing
+	// is engaged), never the cable.
 	mic, micOK := resolveMic(capture, settings.MicName)
 	cable, cableOK := resolveCable(playback, settings.CableName)
 	if !micOK {
-		// No usable mic: Configure leaves the capture device defaulted, so this
-		// is only informational.
 		log.Printf("no microphone resolved; using the system default capture device")
 	}
 
 	engine := audio.NewEngine(ctx, lib)
 
-	// Without the VB-CABLE playback endpoint there is nowhere to route the mix
-	// (a zero device id would target garbage, not the default speakers). Run in
-	// degraded mode: keep the tray alive so the user can install VB-CABLE and
-	// relaunch, but do not start the duplex engine.
-	engineRunning := false
+	// Seed the engine gains from saved volumes (default to unity).
+	applyVolumes(engine, settings)
+
+	// Without the VB-CABLE playback endpoint there is nowhere to route the mix.
+	// Run in degraded mode: keep the window alive so the user can install
+	// VB-CABLE and relaunch, but do not start the duplex engine.
 	if cableOK {
 		if err := engine.Configure(mic, cable); err != nil {
 			log.Printf("configure engine: %v (running without audio routing)", err)
+		} else if err := engine.Start(); err != nil {
+			log.Printf("start engine: %v (running without audio routing)", err)
 		} else {
-			// Optional local monitor: only when a monitor device is configured.
-			if settings.Monitor && settings.MonitorName != "" {
-				if mon, ok := devices.FindByName(playback, settings.MonitorName); ok {
-					if err := engine.SetMonitor(&mon); err != nil {
-						log.Printf("enable monitor: %v", err)
-					}
-				} else {
-					log.Printf("monitor device %q not found; monitor disabled", settings.MonitorName)
-				}
-			}
-			if err := engine.Start(); err != nil {
-				log.Printf("start engine: %v (running without audio routing)", err)
-			} else {
-				engineRunning = true
-				defer func() { _ = engine.Stop() }()
-			}
+			defer func() { _ = engine.Stop() }()
 		}
 	} else {
-		log.Printf("VB-CABLE absent: starting in setup mode (no audio routing). " +
-			"Install VB-CABLE and relaunch.")
+		log.Printf("VB-CABLE absent: starting in setup mode (no audio routing). Install VB-CABLE and relaunch.")
 	}
 
-	// Hotkeys.
+	// Hotkeys fire clips at their saved per-clip volume.
 	hk := hotkeys.New()
-	hk.OnTrigger(func(clipID string) { engine.Trigger(clipID) })
+	hk.OnTrigger(func(clipID string) { engine.TriggerGain(clipID, clipGain(settings, clipID)) })
 	for combo, clipID := range settings.Hotkeys {
 		if lib.Get(clipID) == nil {
 			log.Printf("hotkey %q: clip %q not found in library", combo, clipID)
@@ -140,78 +135,110 @@ func main() {
 	hk.Run()
 	defer hk.Close()
 
-	// Tray UI (blocks until quit).
-	ui := tray.New(lib, engine)
-
-	// Setup section: open the VB-CABLE download page, or show the Discord steps.
-	ui.SetSetup(
-		status.CableInputPresent,
-		func() {
-			if err := winui.OpenURL(wizard.DownloadURL()); err != nil {
-				log.Printf("open download page: %v", err)
-			}
-		},
-		func() { winui.Info("SoundBoard — Discord setup", wizard.DiscordChecklist()) },
-	)
-
-	// The checkbox reflects the engine's actual monitor state at launch.
-	ui.SetMonitorInitialState(engineRunning && settings.Monitor && settings.MonitorName != "")
-	ui.OnMonitorToggle(func(on bool) {
-		if !on {
-			_ = engine.SetMonitor(nil)
-			settings.Monitor = false
-			return
-		}
-		if settings.MonitorName == "" {
-			log.Printf("monitor toggle ignored: no monitor device configured")
-			return
-		}
-		if mon, ok := devices.FindByName(playback, settings.MonitorName); ok {
-			if err := engine.SetMonitor(&mon); err != nil {
-				log.Printf("enable monitor: %v", err)
-				return
-			}
-			settings.Monitor = true
-		} else {
-			log.Printf("monitor device %q not found", settings.MonitorName)
-		}
-	})
-	ui.OnQuit(func() {
-		_ = engine.Stop()
-		hk.Close()
+	// Save settings on exit.
+	defer func() {
 		if err := settings.Save(); err != nil {
 			log.Printf("save settings: %v", err)
 		}
-	})
+	}()
 
-	// On launch, if VB-CABLE is missing the app can't route audio yet. Pop a
-	// visible setup dialog (non-blocking, so the tray still appears) offering to
-	// open the download page. Runs once the tray is ready.
-	ui.Run(func() {
-		if status.CableInputPresent {
-			return
+	// Build the controllers the UI talks to, then run the Fyne main loop
+	// (blocks until Quit).
+	vol := &volController{engine: engine, settings: settings}
+	setupCtl := &setupController{status: status}
+	app := ui.New(lib, engine, vol, setupCtl)
+	app.Run()
+}
+
+// applyVolumes seeds the engine's mic/master gains from saved settings,
+// defaulting missing (zero) values to unity.
+func applyVolumes(engine *audio.Engine, s *config.Settings) {
+	engine.SetMicGain(orUnity(s.Volumes.Mic))
+	engine.SetMasterGain(orUnity(s.Volumes.Master))
+}
+
+// clipGain returns the saved per-clip gain for id, defaulting to unity.
+func clipGain(s *config.Settings, id string) float32 {
+	if s.Volumes.PerClip != nil {
+		if g, ok := s.Volumes.PerClip[id]; ok {
+			return g
 		}
-		go func() {
-			msg := "SoundBoard plays sounds over your microphone using VB-CABLE, " +
-				"but VB-CABLE isn't installed yet.\n\n" +
-				"Click Yes to open the download page. Install it (needs admin + a reboot), " +
-				"then restart SoundBoard.\n\n" +
-				"After installing:\n" + wizard.DiscordChecklist()
-			if winui.Confirm("SoundBoard — setup needed", msg) {
-				if err := winui.OpenURL(wizard.DownloadURL()); err != nil {
-					log.Printf("open download page: %v", err)
-				}
-			}
-		}()
-	})
+	}
+	return 1
+}
+
+// orUnity maps a zero (unset) gain to 1.0.
+func orUnity(g float32) float32 {
+	if g == 0 {
+		return 1
+	}
+	return g
+}
+
+// Compile-time checks that the wiring types satisfy the UI's interfaces, so a
+// signature drift fails the build here rather than silently.
+var (
+	_ ui.Player           = (*audio.Engine)(nil)
+	_ ui.VolumeController = (*volController)(nil)
+	_ ui.SetupController  = (*setupController)(nil)
+)
+
+// volController adapts the engine + settings to ui.VolumeController. Setters
+// push the new level to the engine and persist it in settings; getters seed the
+// sliders. It satisfies ui.VolumeController.
+type volController struct {
+	engine   *audio.Engine
+	settings *config.Settings
+}
+
+func (v *volController) SetMic(g float32) {
+	v.engine.SetMicGain(g)
+	v.settings.Volumes.Mic = g
+}
+
+func (v *volController) SetMaster(g float32) {
+	v.engine.SetMasterGain(g)
+	v.settings.Volumes.Master = g
+}
+
+func (v *volController) SetClip(id string, g float32) {
+	if v.settings.Volumes.PerClip == nil {
+		v.settings.Volumes.PerClip = map[string]float32{}
+	}
+	v.settings.Volumes.PerClip[id] = g
+}
+
+func (v *volController) Mic() float32           { return orUnity(v.settings.Volumes.Mic) }
+func (v *volController) Master() float32        { return orUnity(v.settings.Volumes.Master) }
+func (v *volController) Clip(id string) float32 { return clipGain(v.settings, id) }
+
+// setupController adapts internal/setup to ui.SetupController. It satisfies
+// ui.SetupController.
+type setupController struct {
+	status setup.Status
+}
+
+func (s *setupController) Status() (bool, string) {
+	if s.status.CanEngage {
+		return true, "VB-CABLE detected — routing ready"
+	}
+	if s.status.CableInputPresent {
+		return false, "VB-CABLE Input found, but CABLE Output is missing"
+	}
+	return false, "VB-CABLE NOT detected — click Install / Fix routing"
+}
+
+func (s *setupController) Install() error { return setup.InstallCable(nil) }
+
+func (s *setupController) Engage() error {
+	_, err := setup.EngageRouting()
+	return err
 }
 
 // soundsRoot locates the directory that contains the sounds/ folder and returns
 // an fs.FS rooted there plus the chosen base path. It prefers the directory of
-// the running executable (so a shipped soundboard.exe + sounds/ folder work
-// regardless of the working directory), then the current working directory. If
-// no sounds/ exists yet, it creates an empty one next to the exe so first run is
-// clean and the user can drop clips in.
+// the running executable, then the current working directory. If no sounds/
+// exists yet, it creates an empty one next to the exe so first run is clean.
 func soundsRoot() (fs.FS, string) {
 	var bases []string
 	if exe, err := os.Executable(); err == nil {

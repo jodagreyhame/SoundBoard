@@ -24,6 +24,33 @@ type Settings struct {
 	MonitorName string            `json:"monitorName"`
 	Monitor     bool              `json:"monitor"`
 	Hotkeys     map[string]string `json:"hotkeys"`
+
+	// Volumes holds the in-app mixer levels (all managed inside SoundBoard;
+	// nothing in Discord is changed by the user). Omitted when empty so an
+	// upgraded config without volumes round-trips to its prior shape.
+	Volumes Volumes `json:"volumes,omitempty"`
+
+	// Window holds the Fyne main-window placement/size preferences so the app
+	// reopens where the user left it. Omitted when empty.
+	Window WindowPrefs `json:"window,omitempty"`
+}
+
+// Volumes are the soundboard mixer levels, all linear amplitudes where 1.0
+// means unchanged. Mic scales the live mic passthrough; Master scales every
+// clip; PerClip maps a clip ID to its own multiplier (applied on top of
+// Master). A missing or zero PerClip entry means unity.
+type Volumes struct {
+	Mic     float32            `json:"mic,omitempty"`
+	Master  float32            `json:"master,omitempty"`
+	PerClip map[string]float32 `json:"perClip,omitempty"`
+}
+
+// WindowPrefs persists the main window's last size and whether it was shown.
+// Width/Height of 0 mean "use the default size".
+type WindowPrefs struct {
+	Width   float32 `json:"width,omitempty"`
+	Height  float32 `json:"height,omitempty"`
+	Maximized bool  `json:"maximized,omitempty"`
 }
 
 // dir returns the absolute path to the application's config directory.
