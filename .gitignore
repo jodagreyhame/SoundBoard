@@ -16,3 +16,6 @@ desktop.ini
 sounds_src/
 *.part
 *.ytdl
+# Raw, un-normalized download temp files from the download scripts.
+sounds/**/.raw_*
+.raw_*
