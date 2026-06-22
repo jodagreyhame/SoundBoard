@@ -19,3 +19,4 @@ sounds_src/
 # Raw, un-normalized download temp files from the download scripts.
 sounds/**/.raw_*
 .raw_*
+*.exe~

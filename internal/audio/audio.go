@@ -49,7 +49,29 @@ const (
 	// blocks in practice; if it somehow fills, Trigger drops the extra trigger
 	// rather than block a non-RT goroutine.
 	pendingCap = 256
+
+	// maxGain is the upper clamp for the mic, master, and per-clip gains. A
+	// little headroom above unity (1.5 ~= +3.5 dB) lets the user boost a quiet
+	// mic or clip without permitting extreme values that would just slam every
+	// sample into the [-1,1] clamp and clip badly.
+	maxGain = 1.5
 )
+
+// clampGain constrains a linear gain to [0, maxGain]. Shared by every gain
+// setter (mic, master, per-clip) so the RT callback never sees a NaN or an
+// out-of-range value.
+func clampGain(g float32) float32 {
+	if g != g { // NaN
+		return 0
+	}
+	if g < 0 {
+		return 0
+	}
+	if g > maxGain {
+		return maxGain
+	}
+	return g
+}
 
 // clipCursor tracks playback position of one active clip instance. Multiple
 // cursors over the same clip allow overlap. pos is a sample index into the
@@ -89,7 +111,7 @@ type pendingClip struct {
 }
 
 // float32bits / float32frombits store a float32 in an atomic.Uint32.
-func float32bits(f float32) uint32  { return math.Float32bits(f) }
+func float32bits(f float32) uint32     { return math.Float32bits(f) }
 func float32frombits(u uint32) float32 { return math.Float32frombits(u) }
 
 // Engine owns the duplex device, the optional monitor device, and the active
@@ -154,23 +176,17 @@ func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 }
 
 // SetMicGain sets the live mic-passthrough gain (linear, 1.0 = unchanged).
-// Negative values are clamped to 0. Safe to call from any goroutine; the RT
+// The value is clamped to [0, maxGain]. Safe to call from any goroutine; the RT
 // callback picks the new value up on its next buffer.
 func (e *Engine) SetMicGain(g float32) {
-	if g < 0 {
-		g = 0
-	}
-	e.micGainBits.Store(float32bits(g))
+	e.micGainBits.Store(float32bits(clampGain(g)))
 }
 
 // SetMasterGain sets the soundboard master gain (linear, 1.0 = unchanged)
-// applied to every clip on top of its per-clip volume. Negative values are
-// clamped to 0. Safe to call from any goroutine.
+// applied to every clip on top of its per-clip volume. The value is clamped to
+// [0, maxGain]. Safe to call from any goroutine.
 func (e *Engine) SetMasterGain(g float32) {
-	if g < 0 {
-		g = 0
-	}
-	e.masterGainBits.Store(float32bits(g))
+	e.masterGainBits.Store(float32bits(clampGain(g)))
 }
 
 // micGain / masterGain read the current gains lock-free.
@@ -368,10 +384,10 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 	if _, err := e.lib.EnsureDecoded(clip); err != nil || len(clip.PCM) == 0 {
 		return
 	}
-	if gain < 0 {
-		gain = 0
-	}
-	pc := pendingClip{clip: clip, gain: gain * e.masterGain()}
+	// Clamp the per-clip gain to the same [0, maxGain] range as the mic/master
+	// gains, then fold in the master gain captured now so later master changes
+	// do not retroactively alter sounds already in flight.
+	pc := pendingClip{clip: clip, gain: clampGain(gain) * e.masterGain()}
 	select {
 	case e.pending <- pc:
 	default:

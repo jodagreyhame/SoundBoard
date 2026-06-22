@@ -48,9 +48,28 @@ type Volumes struct {
 // WindowPrefs persists the main window's last size and whether it was shown.
 // Width/Height of 0 mean "use the default size".
 type WindowPrefs struct {
-	Width   float32 `json:"width,omitempty"`
-	Height  float32 `json:"height,omitempty"`
-	Maximized bool  `json:"maximized,omitempty"`
+	Width     float32 `json:"width,omitempty"`
+	Height    float32 `json:"height,omitempty"`
+	Maximized bool    `json:"maximized,omitempty"`
+}
+
+// normalize fills in safe defaults so callers never read a zero mixer level or
+// nil PerClip map. A missing or zero Mic/Master means unity (1.0); a nil
+// PerClip becomes an empty map. This is applied after Load so the in-app mixer
+// starts at full volume on a fresh config and is never nil-dereferenced.
+func (s *Settings) normalize() {
+	if s.Hotkeys == nil {
+		s.Hotkeys = map[string]string{}
+	}
+	if s.Volumes.Mic == 0 {
+		s.Volumes.Mic = 1
+	}
+	if s.Volumes.Master == 0 {
+		s.Volumes.Master = 1
+	}
+	if s.Volumes.PerClip == nil {
+		s.Volumes.PerClip = map[string]float32{}
+	}
 }
 
 // dir returns the absolute path to the application's config directory.
@@ -99,7 +118,9 @@ func Load() (*Settings, error) {
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return &Settings{Hotkeys: map[string]string{}}, nil
+			s := &Settings{}
+			s.normalize()
+			return s, nil
 		}
 		return nil, err
 	}
@@ -107,9 +128,7 @@ func Load() (*Settings, error) {
 	if err := json.Unmarshal(data, s); err != nil {
 		return nil, err
 	}
-	if s.Hotkeys == nil {
-		s.Hotkeys = map[string]string{}
-	}
+	s.normalize()
 	return s, nil
 }
 

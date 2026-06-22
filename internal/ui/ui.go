@@ -16,13 +16,10 @@ package ui
 
 import (
 	_ "embed"
-	"strings"
 
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/widget"
 
 	"soundboard/internal/catalog"
 )
@@ -74,8 +71,20 @@ type App struct {
 	fyneApp fyne.App
 	win     fyne.Window
 
-	// search holds the current filter text; rebuildClips reads it.
+	// search holds the current filter text; the clip browser reads it.
 	search string
+
+	// selected is the clip ID currently bound to the per-clip volume slider in
+	// the volume panel (empty = none selected).
+	selected string
+
+	// rebuildBrowser re-renders the category sections from the current filter.
+	// Assigned in buildClipBrowser; nil before Run.
+	rebuildBrowser func()
+
+	// selectClip binds a clip to the per-clip volume slider. Assigned in
+	// buildVolumeArea; nil before Run.
+	selectClip func(clip *catalog.Clip)
 }
 
 // New constructs the App with its dependencies. It does not build any Fyne
@@ -94,33 +103,40 @@ func New(lib *catalog.Library, player Player, vol VolumeController, setup SetupC
 // loop. It must be called on the main goroutine. Closing the window hides it to
 // the tray (SetCloseIntercept); the tray's Quit item exits the app.
 func (a *App) Run() {
-	a.fyneApp = fyneapp.New()
+	a.build(fyneapp.New())
+	a.win.Show()
+	a.fyneApp.Run()
+}
+
+// build wires the given fyne.App into a full window + system tray. It is split
+// out of Run so tests can drive it with a headless test app and never call
+// Run (which would block on the GUI event loop).
+func (a *App) build(app fyne.App) {
+	a.fyneApp = app
 	icon := fyne.NewStaticResource("soundboard.png", iconPNG)
 	a.fyneApp.SetIcon(icon)
 
 	a.win = a.fyneApp.NewWindow("SoundBoard")
 	a.win.SetContent(a.buildContent())
-	a.win.Resize(fyne.NewSize(720, 560))
+	a.win.Resize(fyne.NewSize(760, 600))
 	a.win.CenterOnScreen()
 
-	// Closing the window hides to tray rather than quitting.
+	// Closing the window hides to tray rather than quitting, so the soundboard
+	// and hotkeys keep running in the background.
 	a.win.SetCloseIntercept(func() { a.win.Hide() })
 
 	// System tray (desktop driver only). The menu controls show/quit; the icon
-	// itself opens the window on left-click via SetSystemTrayWindow.
+	// itself reopens the window on click via SetSystemTrayWindow.
 	if desk, ok := a.fyneApp.(desktop.App); ok {
 		menu := fyne.NewMenu("SoundBoard",
 			fyne.NewMenuItem("Open SoundBoard", a.ShowWindow),
 			fyne.NewMenuItemSeparator(),
-			fyne.NewMenuItem("Quit", func() { a.fyneApp.Quit() }),
+			fyne.NewMenuItem("Quit", a.quit),
 		)
 		desk.SetSystemTrayMenu(menu)
 		desk.SetSystemTrayIcon(icon)
 		desk.SetSystemTrayWindow(a.win)
 	}
-
-	a.win.Show()
-	a.fyneApp.Run()
 }
 
 // ShowWindow shows the main window and raises/focuses it. Safe to call from the
@@ -133,124 +149,10 @@ func (a *App) ShowWindow() {
 	a.win.RequestFocus()
 }
 
-// buildContent assembles the full window layout: setup banner on top, volume
-// area on the bottom, and the search box + category clip grid filling the
-// center.
-func (a *App) buildContent() fyne.CanvasObject {
-	return container.NewBorder(
-		a.buildSetupBanner(), // top
-		a.buildVolumeArea(),  // bottom
-		nil, nil,
-		a.buildClipBrowser(), // center
-	)
-}
-
-// buildSetupBanner renders the VB-CABLE status line plus an install/fix action.
-func (a *App) buildSetupBanner() fyne.CanvasObject {
-	ready, detail := false, "VB-CABLE status unknown"
-	if a.setup != nil {
-		ready, detail = a.setup.Status()
+// quit really exits the application (the tray "Quit" item). Window close only
+// hides; this is the single path that ends the process.
+func (a *App) quit() {
+	if a.fyneApp != nil {
+		a.fyneApp.Quit()
 	}
-	status := widget.NewLabel(detail)
-	action := widget.NewButton("Install / Fix routing", func() {
-		if a.setup == nil {
-			return
-		}
-		if ready {
-			_ = a.setup.Engage()
-		} else {
-			_ = a.setup.Install()
-		}
-	})
-	return container.NewBorder(nil, widget.NewSeparator(), nil, action, status)
-}
-
-// buildClipBrowser builds the search box and the scrollable, category-grouped
-// grid of clip buttons. (Skeleton: a static grid keyed off the current filter;
-// live re-filtering is wired here but the rebuild is intentionally minimal.)
-func (a *App) buildClipBrowser() fyne.CanvasObject {
-	search := widget.NewEntry()
-	search.SetPlaceHolder("Search clips…")
-	grid := container.NewVBox()
-
-	rebuild := func() {
-		grid.Objects = grid.Objects[:0]
-		if a.lib != nil {
-			for i := range a.lib.Categories {
-				cat := &a.lib.Categories[i]
-				var buttons []fyne.CanvasObject
-				for _, clip := range cat.Clips {
-					if !match(clip, a.search) {
-						continue
-					}
-					id := clip.ID
-					buttons = append(buttons, widget.NewButton(clip.Name, func() {
-						if a.player != nil {
-							a.player.TriggerGain(id, 1)
-						}
-					}))
-				}
-				if len(buttons) == 0 {
-					continue
-				}
-				grid.Add(widget.NewLabel(cat.Name))
-				grid.Add(container.NewGridWrap(fyne.NewSize(150, 36), buttons...))
-			}
-		}
-		grid.Refresh()
-	}
-
-	search.OnChanged = func(s string) {
-		a.search = s
-		rebuild()
-	}
-	rebuild()
-
-	return container.NewBorder(search, nil, nil, nil, container.NewVScroll(grid))
-}
-
-// buildVolumeArea builds the mic / master / per-clip sliders. The per-clip
-// slider here is a single shared control acting on the most-recently triggered
-// clip in the full app; the skeleton wires it to SetMaster's sibling SetClip via
-// a placeholder id so the signature path compiles.
-func (a *App) buildVolumeArea() fyne.CanvasObject {
-	mic := widget.NewSlider(0, 2)
-	master := widget.NewSlider(0, 2)
-	perClip := widget.NewSlider(0, 2)
-	if a.vol != nil {
-		mic.SetValue(float64(a.vol.Mic()))
-		master.SetValue(float64(a.vol.Master()))
-		perClip.SetValue(1)
-	}
-	mic.OnChanged = func(v float64) {
-		if a.vol != nil {
-			a.vol.SetMic(float32(v))
-		}
-	}
-	master.OnChanged = func(v float64) {
-		if a.vol != nil {
-			a.vol.SetMaster(float32(v))
-		}
-	}
-	// Per-clip control is wired by the selected clip elsewhere; left as a
-	// display control in the skeleton.
-	_ = perClip
-
-	return container.NewVBox(
-		widget.NewSeparator(),
-		container.NewBorder(nil, nil, widget.NewLabel("Mic"), nil, mic),
-		container.NewBorder(nil, nil, widget.NewLabel("Soundboard"), nil, master),
-		container.NewBorder(nil, nil, widget.NewLabel("Selected clip"), nil, perClip),
-	)
-}
-
-// match reports whether a clip passes the current filter (case-insensitive
-// substring on name or category; empty filter matches everything).
-func match(clip *catalog.Clip, filter string) bool {
-	if filter == "" {
-		return true
-	}
-	f := strings.ToLower(filter)
-	return strings.Contains(strings.ToLower(clip.Name), f) ||
-		strings.Contains(strings.ToLower(clip.Category), f)
 }
