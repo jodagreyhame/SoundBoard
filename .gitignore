@@ -1,0 +1,18 @@
+# Binaries
+soundboard.exe
+*.exe
+
+# Go
+vendor/
+
+# Build artifacts
+dist/
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Content work scratch
+sounds_src/
+*.part
+*.ytdl
