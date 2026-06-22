@@ -105,6 +105,41 @@ func TestLoadDecodesPCM(t *testing.T) {
 	}
 }
 
+// TestGetExtensionFallback verifies Get resolves both the canonical
+// extensionless ID and an ID written with the source file extension, so a
+// hotkey config in either form fires the clip.
+func TestGetExtensionFallback(t *testing.T) {
+	fsys := fstest.MapFS{
+		"sounds/memes/airhorn.mp3":  {Data: []byte("ignored")},
+		"sounds/games/level-up.wav": {Data: []byte("ignored")},
+	}
+	lib, err := New(fsys)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Canonical extensionless form.
+	if c := lib.Get("memes/airhorn"); c == nil {
+		t.Fatal("Get(memes/airhorn) = nil")
+	}
+	// With-extension form (as documented in older configs) resolves too.
+	if c := lib.Get("memes/airhorn.mp3"); c == nil || c.ID != "memes/airhorn" {
+		t.Fatalf("Get(memes/airhorn.mp3) failed to resolve: %+v", c)
+	}
+	if c := lib.Get("games/level-up.wav"); c == nil || c.ID != "games/level-up" {
+		t.Fatalf("Get(games/level-up.wav) failed to resolve: %+v", c)
+	}
+	// A genuinely missing clip (even after stripping) is still nil.
+	if c := lib.Get("memes/nope.mp3"); c != nil {
+		t.Fatalf("Get(memes/nope.mp3) should be nil, got %+v", c)
+	}
+	// A wrong-extension form still resolves because we strip whatever ext is
+	// present before falling back.
+	if c := lib.Get("memes/airhorn.wav"); c == nil || c.ID != "memes/airhorn" {
+		t.Fatalf("Get(memes/airhorn.wav) failed to resolve: %+v", c)
+	}
+}
+
 // TestSampleRateConstants pins the canonical format.
 func TestSampleRateConstants(t *testing.T) {
 	if SampleRate != 48000 || Channels != 2 {

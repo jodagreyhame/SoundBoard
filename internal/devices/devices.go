@@ -92,8 +92,13 @@ func findExactThenContains(list []Device, exact, contains string) (Device, bool)
 }
 
 // FindByName returns the device with an exact matching Name, falling back to
-// the first device whose Name contains the given string.
+// the first device whose Name contains the given string. An empty name never
+// matches (strings.Contains(_, "") is always true, which would otherwise
+// silently resolve to the first device in the list).
 func FindByName(list []Device, name string) (Device, bool) {
+	if name == "" {
+		return Device{}, false
+	}
 	for _, d := range list {
 		if d.Name == name {
 			return d, true

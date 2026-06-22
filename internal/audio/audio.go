@@ -4,11 +4,22 @@
 //
 // Canonical format everywhere: float32 PCM, 48000 Hz, 2 channels interleaved.
 // The data callback must be allocation-free and lock-light.
+//
+// Concurrency model:
+//   - Each RT data callback OWNS its cursor slice exclusively; no other
+//     goroutine touches it, so mixing needs no lock.
+//   - Trigger hands new clips to the callbacks over buffered channels (a
+//     lock-free SPSC-style handoff). The callback drains its channel
+//     non-blocking at the top of each buffer and appends to its own slice.
+//   - ctrlMu serializes lifecycle operations (Configure/SetMonitor/Start/Stop)
+//     and guards the device handles and C-pointer fields. The RT callbacks
+//     never take ctrlMu.
 package audio
 
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/gen2brain/malgo"
@@ -31,6 +42,12 @@ const (
 	// (clip end) ramp, ~4ms at 48kHz, to suppress clicks. Applied per frame so
 	// both channels of an interleaved frame share the same gain.
 	fadeFrames = 192
+
+	// pendingCap bounds how many simultaneously-triggered clips can be queued
+	// for a device between callback invocations. Generous so Trigger never
+	// blocks in practice; if it somehow fills, Trigger drops the extra trigger
+	// rather than block a non-RT goroutine.
+	pendingCap = 256
 )
 
 // clipCursor tracks playback position of one active clip instance. Multiple
@@ -53,6 +70,9 @@ type Engine struct {
 	mic   devices.Device
 	cable devices.Device
 
+	// ctrlMu serializes lifecycle calls and guards the device handles plus the
+	// C-pointer fields below. Never acquired by an RT callback.
+	ctrlMu     sync.Mutex
 	duplexDev  *malgo.Device
 	monitorDev *malgo.Device
 
@@ -63,25 +83,49 @@ type Engine struct {
 	cableIDPtr unsafe.Pointer
 	monIDPtr   unsafe.Pointer
 
-	mu          sync.Mutex
-	cursors     []*clipCursor // duplex (mic+SFX) device cursors
-	monCursors  []*clipCursor // monitor device cursors
-	monitorDest *devices.Device
-
 	started bool
+
+	// monitorActive is read by Trigger (any goroutine) to decide whether to
+	// also enqueue a cursor for the monitor device. Atomic so Trigger never
+	// contends with the lifecycle lock.
+	monitorActive atomic.Bool
+
+	// pending / monPending hand clips from Trigger to the RT callbacks. Each
+	// callback drains its own channel; the slices below are touched only by
+	// their owning callback.
+	pending    chan *catalog.Clip
+	monPending chan *catalog.Clip
+
+	// cursors / monCursors are owned exclusively by their RT callback.
+	cursors    []*clipCursor // duplex (mic+SFX) device cursors
+	monCursors []*clipCursor // monitor device cursors
 }
 
 // NewEngine creates an engine bound to a context and the decoded library.
 func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
-	return &Engine{ctx: ctx, lib: lib}
+	return &Engine{
+		ctx:        ctx,
+		lib:        lib,
+		pending:    make(chan *catalog.Clip, pendingCap),
+		monPending: make(chan *catalog.Clip, pendingCap),
+	}
 }
 
 // Configure sets up the malgo DUPLEX device: Capture=mic, Playback=cable,
 // FormatF32, 48k, 2ch, small period (128-256 frames). It does not start it.
+// A zero-value cable (e.g. VB-CABLE absent) is rejected so we never hand
+// miniaudio a non-nil all-zero device id, which WASAPI cannot match.
 func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 	if e.ctx == nil {
 		return errors.New("audio: nil context")
 	}
+	if cable.Name == "" {
+		return errors.New("audio: no cable playback device")
+	}
+
+	e.ctrlMu.Lock()
+	defer e.ctrlMu.Unlock()
+
 	// Tear down any previously configured duplex device first.
 	if e.duplexDev != nil {
 		e.duplexDev.Uninit()
@@ -101,8 +145,12 @@ func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 
 	cfg.Capture.Format = malgo.FormatF32
 	cfg.Capture.Channels = channels
-	e.micIDPtr = mic.RawID.Pointer()
-	cfg.Capture.DeviceID = e.micIDPtr
+	// A zero-value mic (no capture device) means "default mic": leave the
+	// capture DeviceID nil rather than handing over an all-zero id.
+	if mic.Name != "" {
+		e.micIDPtr = mic.RawID.Pointer()
+		cfg.Capture.DeviceID = e.micIDPtr
+	}
 
 	cfg.Playback.Format = malgo.FormatF32
 	cfg.Playback.Channels = channels
@@ -126,22 +174,28 @@ func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 // non-nil dev opens a SECOND playback-only device with its own cursor list
 // (independent clock) that plays clip PCM only (no mic).
 func (e *Engine) SetMonitor(dev *devices.Device) error {
+	e.ctrlMu.Lock()
+	defer e.ctrlMu.Unlock()
+
 	// Always tear the old monitor down first.
+	e.monitorActive.Store(false)
 	if e.monitorDev != nil {
 		e.monitorDev.Uninit()
 		e.monitorDev = nil
 	}
 	freeCPtr(&e.monIDPtr)
-	e.mu.Lock()
-	e.monCursors = nil
-	e.monitorDest = nil
-	e.mu.Unlock()
+	// Drain any clips queued for the now-defunct monitor so a re-enable starts
+	// clean. (The monitor callback is no longer running to drain them.)
+	drainPending(e.monPending)
 
 	if dev == nil {
 		return nil
 	}
 	if e.ctx == nil {
 		return errors.New("audio: nil context")
+	}
+	if dev.Name == "" {
+		return errors.New("audio: no monitor playback device")
 	}
 
 	cfg := malgo.DefaultDeviceConfig(malgo.Playback)
@@ -163,10 +217,6 @@ func (e *Engine) SetMonitor(dev *devices.Device) error {
 		return err
 	}
 	e.monitorDev = mdev
-	d := *dev
-	e.mu.Lock()
-	e.monitorDest = &d
-	e.mu.Unlock()
 
 	// Match the duplex device's running state so toggling at runtime works.
 	if e.started {
@@ -174,17 +224,18 @@ func (e *Engine) SetMonitor(dev *devices.Device) error {
 			mdev.Uninit()
 			e.monitorDev = nil
 			freeCPtr(&e.monIDPtr)
-			e.mu.Lock()
-			e.monitorDest = nil
-			e.mu.Unlock()
 			return err
 		}
 	}
+	e.monitorActive.Store(true)
 	return nil
 }
 
 // Start activates all configured devices.
 func (e *Engine) Start() error {
+	e.ctrlMu.Lock()
+	defer e.ctrlMu.Unlock()
+
 	if e.duplexDev == nil {
 		return errors.New("audio: not configured")
 	}
@@ -203,7 +254,11 @@ func (e *Engine) Start() error {
 
 // Stop uninitializes/stops all devices without leaking.
 func (e *Engine) Stop() error {
+	e.ctrlMu.Lock()
+	defer e.ctrlMu.Unlock()
+
 	e.started = false
+	e.monitorActive.Store(false)
 	if e.duplexDev != nil {
 		e.duplexDev.Uninit()
 		e.duplexDev = nil
@@ -216,61 +271,93 @@ func (e *Engine) Stop() error {
 	freeCPtr(&e.cableIDPtr)
 	freeCPtr(&e.monIDPtr)
 
-	e.mu.Lock()
+	// Devices are uninitialized, so no callback is running: it is safe to drop
+	// the (callback-owned) cursor slices and drain the handoff channels here.
 	e.cursors = nil
 	e.monCursors = nil
-	e.monitorDest = nil
-	e.mu.Unlock()
+	drainPending(e.pending)
+	drainPending(e.monPending)
 	return nil
 }
 
-// Trigger looks up the clip by ID and appends a clipCursor to the active list,
-// allowing overlap. Both the duplex and (if present) monitor devices get their
-// OWN cursor instance so their independent clocks never share state.
+// Trigger looks up the clip by ID and hands it to the RT callbacks over the
+// pending channels, allowing overlap. Both the duplex and (if active) monitor
+// devices get their OWN cursor instance so their independent clocks never share
+// state. The handoff is non-blocking: if a queue is somehow full, the extra
+// trigger is dropped rather than blocking this (non-RT) goroutine.
 // Implements tray.Player.
 func (e *Engine) Trigger(id string) {
 	clip := e.lib.Get(id)
 	if clip == nil || len(clip.PCM) == 0 {
 		return
 	}
-	e.mu.Lock()
-	e.cursors = append(e.cursors, &clipCursor{pcm: clip.PCM})
-	if e.monitorDest != nil {
-		e.monCursors = append(e.monCursors, &clipCursor{pcm: clip.PCM})
+	select {
+	case e.pending <- clip:
+	default:
 	}
-	e.mu.Unlock()
+	if e.monitorActive.Load() {
+		select {
+		case e.monPending <- clip:
+		default:
+		}
+	}
 }
 
-// duplexCallback is the real-time mixer for the mic->cable path. It sums the
-// live mic input with every active clip cursor, clamps, and writes the result
-// to the playback buffer. Allocation-free; the mutex is held only for the brief
-// snapshot/compaction of the cursor slice.
+// duplexCallback is the real-time mixer for the mic->cable path. It drains any
+// newly-triggered clips into its own cursor slice, then sums the live mic input
+// with every active clip cursor, clamps, and writes the result to the playback
+// buffer. Allocation-free in steady state and lock-free (no mutex).
 func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
+	e.cursors = drainInto(e.pending, e.cursors)
+
 	out := bytesAsF32(pOutput)
 	mic := bytesAsF32(pInput)
 	n := int(frameCount) * channels
 	if n > len(out) {
 		n = len(out)
 	}
-
-	e.mu.Lock()
 	e.cursors = mixInto(out[:n], mic, e.cursors)
-	e.mu.Unlock()
 }
 
 // monitorCallback is the real-time mixer for the local monitor device. It plays
 // ONLY clip audio (no mic passthrough).
 func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 	_ = pInput
+	e.monCursors = drainInto(e.monPending, e.monCursors)
+
 	out := bytesAsF32(pOutput)
 	n := int(frameCount) * channels
 	if n > len(out) {
 		n = len(out)
 	}
-
-	e.mu.Lock()
 	e.monCursors = mixInto(out[:n], nil, e.monCursors)
-	e.mu.Unlock()
+}
+
+// drainInto pops every clip currently queued in ch and appends a fresh cursor
+// for each onto cursors, returning the grown slice. It blocks on nothing (a
+// non-blocking select loop). Any append growth happens on the callback's own
+// slice, never under a lock shared with the producer.
+func drainInto(ch <-chan *catalog.Clip, cursors []*clipCursor) []*clipCursor {
+	for {
+		select {
+		case clip := <-ch:
+			cursors = append(cursors, &clipCursor{pcm: clip.PCM})
+		default:
+			return cursors
+		}
+	}
+}
+
+// drainPending empties a pending channel without consuming into cursors. Used
+// when a device is being torn down or reconfigured.
+func drainPending(ch chan *catalog.Clip) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }
 
 // mixInto writes one callback buffer worth of interleaved float32 samples into

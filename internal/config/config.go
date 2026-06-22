@@ -44,6 +44,24 @@ func path() (string, error) {
 	return filepath.Join(d, configFile), nil
 }
 
+// logFile is the diagnostics log file name within appDir.
+const logFile = "soundboard.log"
+
+// LogPath returns the absolute path to the diagnostics log file and ensures the
+// application config directory exists. Under the shipping GUI build
+// (-H=windowsgui) stderr is detached, so user-facing diagnostics are written
+// here instead of being silently lost.
+func LogPath() (string, error) {
+	d, err := dir()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(d, logFile), nil
+}
+
 // Load reads settings from disk. If the file is missing it returns a
 // zero-value *Settings (with an initialized Hotkeys map) and a nil error.
 func Load() (*Settings, error) {

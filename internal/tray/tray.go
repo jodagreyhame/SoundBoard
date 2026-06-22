@@ -27,6 +27,8 @@ type UI struct {
 	lib    *catalog.Library
 	player Player
 
+	monitorInitiallyOn bool
+
 	onMonitorToggle func(bool)
 	onQuit          func()
 }
@@ -37,6 +39,14 @@ func New(lib *catalog.Library, player Player) *UI {
 		lib:    lib,
 		player: player,
 	}
+}
+
+// SetMonitorInitialState records whether the monitor is already enabled so the
+// tray checkbox renders consistent with the engine's real state on launch.
+// Without this the checkbox always starts unchecked even when the engine booted
+// with monitoring on, forcing a double-click to actually turn it off.
+func (u *UI) SetMonitorInitialState(on bool) {
+	u.monitorInitiallyOn = on
 }
 
 // OnMonitorToggle registers the callback fired when the user toggles the
@@ -84,11 +94,13 @@ func (u *UI) build(onReady func()) func() {
 
 		systray.AddSeparator()
 
-		// Monitor toggle: lets the user hear triggered sounds locally.
+		// Monitor toggle: lets the user hear triggered sounds locally. The
+		// initial checked state mirrors the engine's real monitor state so UI
+		// and engine do not desync at launch.
 		monitor := systray.AddMenuItemCheckbox(
 			"Monitor (hear sounds yourself)",
 			"Play triggered sounds through your own output too",
-			false,
+			u.monitorInitiallyOn,
 		)
 		monitor.Click(func() {
 			var enabled bool

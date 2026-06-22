@@ -149,9 +149,21 @@ func (l *Library) Load() error {
 	return nil
 }
 
-// Get returns the clip with the given ID, or nil if not present.
+// Get returns the clip with the given ID, or nil if not present. Clip IDs are
+// canonically extensionless ("<category>/<basename>"), but a configured hotkey
+// may reference a clip WITH its file extension ("memes/airhorn.mp3"). To make
+// both forms resolve, Get falls back to stripping a trailing extension when the
+// exact ID is not found.
 func (l *Library) Get(id string) *Clip {
-	return l.byID[id]
+	if c, ok := l.byID[id]; ok {
+		return c
+	}
+	if ext := path.Ext(id); ext != "" {
+		if c, ok := l.byID[strings.TrimSuffix(id, ext)]; ok {
+			return c
+		}
+	}
+	return nil
 }
 
 // decodeClip opens, decodes, and resamples a single clip to interleaved

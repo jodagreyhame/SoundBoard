@@ -8,8 +8,10 @@ package main
 
 import (
 	"embed"
+	"io"
 	"io/fs"
 	"log"
+	"os"
 
 	"github.com/gen2brain/malgo"
 
@@ -26,6 +28,16 @@ import (
 var soundsFS embed.FS
 
 func main() {
+	// Route diagnostics to a log file under the config dir. The shipping build
+	// uses -H=windowsgui, which detaches stderr, so plain log.* output would be
+	// invisible. Mirror to stderr too for console/dev builds.
+	if logPath, err := config.LogPath(); err == nil {
+		if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
+			defer f.Close()
+			log.SetOutput(io.MultiWriter(os.Stderr, f))
+		}
+	}
+
 	// Settings.
 	settings, err := config.Load()
 	if err != nil {
@@ -71,28 +83,54 @@ func main() {
 		log.Print(wizard.DiscordChecklist())
 	}
 
-	mic, _ := resolveMic(capture, settings.MicName)
-	cable, _ := resolveCable(playback, settings.CableName)
+	mic, micOK := resolveMic(capture, settings.MicName)
+	cable, cableOK := resolveCable(playback, settings.CableName)
+	if !micOK {
+		// No usable mic: Configure leaves the capture device defaulted, so this
+		// is only informational.
+		log.Printf("no microphone resolved; using the system default capture device")
+	}
 
-	// Engine.
 	engine := audio.NewEngine(ctx, lib)
-	if err := engine.Configure(mic, cable); err != nil {
-		log.Fatalf("configure engine: %v", err)
-	}
-	if settings.Monitor && settings.MonitorName != "" {
-		if mon, ok := devices.FindByName(playback, settings.MonitorName); ok {
-			_ = engine.SetMonitor(&mon)
+
+	// Without the VB-CABLE playback endpoint there is nowhere to route the mix
+	// (a zero device id would target garbage, not the default speakers). Run in
+	// degraded mode: keep the tray alive so the user can install VB-CABLE and
+	// relaunch, but do not start the duplex engine.
+	engineRunning := false
+	if cableOK {
+		if err := engine.Configure(mic, cable); err != nil {
+			log.Printf("configure engine: %v (running without audio routing)", err)
+		} else {
+			// Optional local monitor: only when a monitor device is configured.
+			if settings.Monitor && settings.MonitorName != "" {
+				if mon, ok := devices.FindByName(playback, settings.MonitorName); ok {
+					if err := engine.SetMonitor(&mon); err != nil {
+						log.Printf("enable monitor: %v", err)
+					}
+				} else {
+					log.Printf("monitor device %q not found; monitor disabled", settings.MonitorName)
+				}
+			}
+			if err := engine.Start(); err != nil {
+				log.Printf("start engine: %v (running without audio routing)", err)
+			} else {
+				engineRunning = true
+				defer func() { _ = engine.Stop() }()
+			}
 		}
+	} else {
+		log.Printf("VB-CABLE absent: starting in setup mode (no audio routing). " +
+			"Install VB-CABLE and relaunch.")
 	}
-	if err := engine.Start(); err != nil {
-		log.Fatalf("start engine: %v", err)
-	}
-	defer func() { _ = engine.Stop() }()
 
 	// Hotkeys.
 	hk := hotkeys.New()
 	hk.OnTrigger(func(clipID string) { engine.Trigger(clipID) })
 	for combo, clipID := range settings.Hotkeys {
+		if lib.Get(clipID) == nil {
+			log.Printf("hotkey %q: clip %q not found in library", combo, clipID)
+		}
 		if err := hk.Register(combo, clipID); err != nil {
 			log.Printf("hotkey %q: %v", combo, err)
 		}
@@ -102,18 +140,34 @@ func main() {
 
 	// Tray UI (blocks until quit).
 	ui := tray.New(lib, engine)
+	// The checkbox reflects the engine's actual monitor state at launch.
+	ui.SetMonitorInitialState(engineRunning && settings.Monitor && settings.MonitorName != "")
 	ui.OnMonitorToggle(func(on bool) {
 		if !on {
 			_ = engine.SetMonitor(nil)
+			settings.Monitor = false
+			return
+		}
+		if settings.MonitorName == "" {
+			log.Printf("monitor toggle ignored: no monitor device configured")
 			return
 		}
 		if mon, ok := devices.FindByName(playback, settings.MonitorName); ok {
-			_ = engine.SetMonitor(&mon)
+			if err := engine.SetMonitor(&mon); err != nil {
+				log.Printf("enable monitor: %v", err)
+				return
+			}
+			settings.Monitor = true
+		} else {
+			log.Printf("monitor device %q not found", settings.MonitorName)
 		}
 	})
 	ui.OnQuit(func() {
 		_ = engine.Stop()
 		hk.Close()
+		if err := settings.Save(); err != nil {
+			log.Printf("save settings: %v", err)
+		}
 	})
 	ui.Run(func() {})
 }

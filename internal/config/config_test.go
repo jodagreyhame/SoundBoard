@@ -49,9 +49,11 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		CableName:   "CABLE Input (VB-Audio Virtual Cable)",
 		MonitorName: "Speakers (Realtek)",
 		Monitor:     true,
+		// Clip IDs are canonically extensionless ("<category>/<basename>");
+		// see catalog.Library.Get, which also accepts an extension suffix.
 		Hotkeys: map[string]string{
-			"ctrl+alt+1": "memes/airhorn.mp3",
-			"ctrl+alt+2": "games/level-up.wav",
+			"ctrl+alt+1": "memes/airhorn",
+			"ctrl+alt+2": "games/level-up",
 		},
 	}
 

@@ -102,6 +102,10 @@ func (m *Manager) Run() {
 				}
 				close(stop)
 				wg.Wait()
+				// Drain any other presses that landed in the buffer before we
+				// tore the readers down, so simultaneous distinct hotkeys are
+				// not dropped when the channel is recreated next iteration.
+				drainFired(fired, fn)
 			case <-m.done:
 				close(stop)
 				wg.Wait()
@@ -109,6 +113,22 @@ func (m *Manager) Run() {
 			}
 		}
 	}()
+}
+
+// drainFired empties any presses still buffered in ch (after the readers have
+// stopped) and dispatches each through fn, so simultaneous distinct hotkeys are
+// not dropped when the channel is recreated on the next pump iteration.
+func drainFired(ch <-chan string, fn func(clipID string)) {
+	for {
+		select {
+		case clipID := <-ch:
+			if fn != nil {
+				fn(clipID)
+			}
+		default:
+			return
+		}
+	}
 }
 
 // Close unregisters all hotkeys and stops the pump.
