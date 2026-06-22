@@ -45,12 +45,13 @@ type Volumes struct {
 	PerClip map[string]float32 `json:"perClip,omitempty"`
 }
 
-// WindowPrefs persists the main window's last size and whether it was shown.
-// Width/Height of 0 mean "use the default size".
+// WindowPrefs persists the main window's last content size so the app reopens at
+// the size the user left it. Width/Height of 0 mean "use the default size". The
+// ui layer reads these on build and writes the latest size back on window close
+// or quit, which main persists via Settings.Save.
 type WindowPrefs struct {
-	Width     float32 `json:"width,omitempty"`
-	Height    float32 `json:"height,omitempty"`
-	Maximized bool    `json:"maximized,omitempty"`
+	Width  float32 `json:"width,omitempty"`
+	Height float32 `json:"height,omitempty"`
 }
 
 // normalize fills in safe defaults so callers never read a zero mixer level or

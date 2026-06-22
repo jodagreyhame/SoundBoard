@@ -2,6 +2,9 @@ package setup
 
 import (
 	"archive/zip"
+	"errors"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,6 +132,67 @@ func TestDownloadURLsAllOfficial(t *testing.T) {
 		if !strings.HasPrefix(u, "https://download.vb-audio.com/") {
 			t.Errorf("non-official URL: %q", u)
 		}
+	}
+}
+
+// TestValidateDownloadURL enforces the elevated-installer download policy:
+// HTTPS on download.vb-audio.com only. http, a different host, or a redirect to
+// either must be refused with ErrUnsafeDownload. This is the runtime guard the
+// static URL list cannot provide, since a 30x could otherwise redirect off-CDN.
+func TestValidateDownloadURL(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		ok   bool
+	}{
+		{"official https", "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip", true},
+		{"official https with port", "https://download.vb-audio.com:443/x.zip", true},
+		{"host case-insensitive", "https://Download.VB-Audio.com/x.zip", true},
+		{"http scheme rejected", "http://download.vb-audio.com/x.zip", false},
+		{"foreign host rejected", "https://evil.example.com/x.zip", false},
+		{"subdomain spoof rejected", "https://download.vb-audio.com.evil.com/x.zip", false},
+		{"no scheme rejected", "download.vb-audio.com/x.zip", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.raw)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.raw, err)
+			}
+			gotErr := validateDownloadURL(u)
+			if tc.ok && gotErr != nil {
+				t.Fatalf("expected %q allowed, got %v", tc.raw, gotErr)
+			}
+			if !tc.ok {
+				if gotErr == nil {
+					t.Fatalf("expected %q refused, got nil", tc.raw)
+				}
+				if !errors.Is(gotErr, ErrUnsafeDownload) {
+					t.Fatalf("expected ErrUnsafeDownload for %q, got %v", tc.raw, gotErr)
+				}
+			}
+		})
+	}
+}
+
+// TestSafeClientRejectsOffHostRedirect verifies the shared client's
+// CheckRedirect refuses a hop to a foreign host (the elevated-download policy)
+// while allowing one that stays on the VB-Audio CDN over HTTPS.
+func TestSafeClientRejectsOffHostRedirect(t *testing.T) {
+	mk := func(raw string) *http.Request {
+		req, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		return req
+	}
+	// Off-host redirect must be refused.
+	if err := safeHTTPClient.CheckRedirect(mk("https://evil.example.com/x.zip"), nil); err == nil {
+		t.Fatal("CheckRedirect must refuse an off-host redirect")
+	}
+	// Same-CDN HTTPS redirect is allowed.
+	if err := safeHTTPClient.CheckRedirect(mk("https://download.vb-audio.com/other.zip"), nil); err != nil {
+		t.Fatalf("CheckRedirect must allow same-CDN HTTPS redirect, got %v", err)
 	}
 }
 

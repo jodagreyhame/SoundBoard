@@ -73,6 +73,15 @@ const (
 // enabled endpoints so a disabled "CABLE Output" never matches.
 const deviceStateActive uint32 = 0x00000001
 
+// COM HRESULTs from CoInitializeEx that we special-case. S_OK and S_FALSE are
+// BOTH successes that add a refcount the caller must balance with
+// CoUninitialize; only RPC_E_CHANGED_MODE means "already initialized in another
+// apartment, no refcount added" so we must NOT CoUninitialize for it.
+const (
+	sFalse          uintptr = 0x00000001
+	rpcEChangedMode uintptr = 0x80010106
+)
+
 // stgmRead is STGM_READ for IMMDevice::OpenPropertyStore (read-only access).
 const stgmRead uint32 = 0x00000000
 
@@ -168,18 +177,43 @@ type comSession struct {
 }
 
 // enterCOM pins the goroutine to its OS thread and initializes COM in the
-// multi-threaded apartment. If COM was already initialized on this thread with a
-// different model, CoInitializeEx returns RPC_E_CHANGED_MODE; we treat that as a
-// non-fatal "already initialized" and skip the matching CoUninitialize.
+// apartment-threaded model. CoInitializeEx returns one of:
+//
+//   - S_OK (err == nil): we initialized COM and OWN a refcount.
+//   - S_FALSE (0x1): COM was already initialized in the SAME apartment on this
+//     thread; this STILL adds a refcount we must balance with CoUninitialize.
+//   - RPC_E_CHANGED_MODE (0x80010106): COM was already initialized in a
+//     DIFFERENT apartment; no refcount was added, so we must NOT CoUninitialize.
+//
+// go-ole reports any non-zero HRESULT (including the S_FALSE success) as a
+// non-nil *OleError, so we cannot use `err == nil` alone — that would skip the
+// CoUninitialize for the S_FALSE path and leak a COM init refcount on every
+// call (Fyne/malgo also init COM and Go reuses LockOSThread threads, so S_FALSE
+// is hit routinely). We inspect the HRESULT and balance unless it is exactly
+// RPC_E_CHANGED_MODE.
 func enterCOM() *comSession {
 	runtime.LockOSThread()
-	s := &comSession{}
 	// COINIT_APARTMENTTHREADED (0x2) — the model the MMDevice API documents.
 	err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED)
+	return &comSession{uninit: ownsCOMInit(err)}
+}
+
+// ownsCOMInit reports whether the CoInitializeEx result means THIS call added a
+// COM init refcount that Close must balance with CoUninitialize. It is true for
+// S_OK (err==nil) and S_FALSE (already-initialized in the same apartment — still
+// refcounted), and false ONLY for RPC_E_CHANGED_MODE (different apartment, no
+// refcount added). Unknown non-nil results default to true so we err toward
+// balancing rather than leaking. Pure, so the refcount classification is unit-
+// testable without a live COM apartment.
+func ownsCOMInit(err error) bool {
 	if err == nil {
-		s.uninit = true
+		return true // S_OK
 	}
-	return s
+	var oerr *ole.OleError
+	if errors.As(err, &oerr) && oerr.Code() == rpcEChangedMode {
+		return false // RPC_E_CHANGED_MODE: no refcount added
+	}
+	return true // S_FALSE and any other success-wrapped HRESULT: we own an init
 }
 
 func (s *comSession) Close() {
@@ -292,9 +326,18 @@ func deviceFriendlyName(dev *ole.IUnknown) (string, error) {
 		return "", fmt.Errorf("winaudio: GetValue(FriendlyName): %w", ole.NewError(hr))
 	}
 	if pv.vt != vtLPWSTR || pv.lpwstr == nil {
-		return "", nil // no friendly name; caller skips this endpoint
+		// Nothing was allocated into the union for a non-LPWSTR / null result, so
+		// there is nothing to free; just skip this endpoint.
+		return "", nil
 	}
-	return utf16PtrToString(pv.lpwstr), nil
+	// For a VT_LPWSTR PROPVARIANT the property store CoTaskMemAlloc'd the string
+	// buffer and handed us ownership. Copy it to a Go string, then free the
+	// COM allocation (mirroring deviceID's GetId handling) so enumerating every
+	// active endpoint on each engage/restore/detect does not leak a wide string
+	// per device.
+	name := utf16PtrToString(pv.lpwstr)
+	ole.CoTaskMemFree(uintptr(unsafe.Pointer(pv.lpwstr)))
+	return name, nil
 }
 
 // findEndpointID enumerates ACTIVE endpoints of the given flow and returns the

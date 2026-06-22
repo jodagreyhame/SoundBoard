@@ -73,7 +73,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 				"memes/airhorn": 1.25,
 			},
 		},
-		Window: WindowPrefs{Width: 800, Height: 600, Maximized: true},
+		Window: WindowPrefs{Width: 800, Height: 600},
 	}
 
 	if err := want.Save(); err != nil {

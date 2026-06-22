@@ -48,6 +48,31 @@ func stringToUTF16WithNul(s string) []uint16 {
 	return append(out, 0)
 }
 
+// TestOwnsCOMInit pins the CoInitializeEx HRESULT classification: S_OK and
+// S_FALSE both add a refcount we must balance with CoUninitialize, while
+// RPC_E_CHANGED_MODE does not. go-ole returns S_FALSE as a non-nil *OleError, so
+// a naive `err == nil` check would leak one COM init per call on the (common)
+// already-initialized-same-apartment path.
+func TestOwnsCOMInit(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"S_OK", nil, true},
+		{"S_FALSE", ole.NewError(sFalse), true},
+		{"RPC_E_CHANGED_MODE", ole.NewError(rpcEChangedMode), false},
+		{"other failure (E_FAIL)", ole.NewError(0x80004005), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ownsCOMInit(tc.err); got != tc.want {
+				t.Fatalf("ownsCOMInit(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestPolicyConfigVtableLayout pins the byte offset of SetDefaultEndpoint in the
 // IPolicyConfig vtable. This is the single most fragile fact in the package: the
 // interface is undocumented, and an off-by-one slot would silently call the

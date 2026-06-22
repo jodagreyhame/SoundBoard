@@ -52,13 +52,31 @@ type VolumeController interface {
 
 // SetupController exposes the VB-CABLE / auto-route state to the banner.
 type SetupController interface {
-	// Status reports whether routing is ready (cable present + engaged) and a
-	// short human-readable detail line for the banner.
+	// Status reports whether routing is ready (cable present AND engaged — i.e.
+	// the Windows default mic is actually pointed at CABLE Output) and a short
+	// human-readable detail line for the banner. ready is false when the cable is
+	// missing OR present-but-not-yet-engaged.
 	Status() (ready bool, detail string)
+	// CanEngage reports whether the cable is present so routing CAN be engaged
+	// without installing first. The banner uses it to choose between the Install
+	// and Engage actions when Status is not yet ready.
+	CanEngage() bool
 	// Install runs the one-click VB-CABLE download + silent elevated install.
 	Install() error
-	// Engage (re)asserts the default-capture routing to CABLE Output.
+	// Engage asserts the default-capture routing to CABLE Output and records that
+	// routing is now engaged (so Status flips to ready).
 	Engage() error
+}
+
+// WindowStore persists the main window's size so the app reopens at the size the
+// user left it. Optional: when nil the window uses its default size. Width/Height
+// are in Fyne logical pixels; a zero saved size means "use the default".
+type WindowStore interface {
+	// WindowSize returns the saved window size. ok is false (or w/h are 0) when no
+	// size has been saved yet, in which case the default size is used.
+	WindowSize() (w, h float32, ok bool)
+	// SetWindowSize records the latest window size to be persisted on save.
+	SetWindowSize(w, h float32)
 }
 
 // App owns the Fyne application, the main window, and the wired controllers.
@@ -67,6 +85,9 @@ type App struct {
 	player Player
 	vol    VolumeController
 	setup  SetupController
+
+	// window persists/restores the main window size. Optional; nil = default size.
+	window WindowStore
 
 	fyneApp fyne.App
 	win     fyne.Window
@@ -99,6 +120,14 @@ func New(lib *catalog.Library, player Player, vol VolumeController, setup SetupC
 	}
 }
 
+// WithWindowStore attaches an optional WindowStore so the window size is
+// restored on build and recorded on close/quit. Returns the App for chaining.
+// Call before Run/build.
+func (a *App) WithWindowStore(w WindowStore) *App {
+	a.window = w
+	return a
+}
+
 // Run builds the window and system tray, then blocks running the Fyne main
 // loop. It must be called on the main goroutine. Closing the window hides it to
 // the tray (SetCloseIntercept); the tray's Quit item exits the app.
@@ -118,12 +147,25 @@ func (a *App) build(app fyne.App) {
 
 	a.win = a.fyneApp.NewWindow("SoundBoard")
 	a.win.SetContent(a.buildContent())
-	a.win.Resize(fyne.NewSize(760, 600))
+
+	// Restore the saved window size when one was persisted; otherwise use the
+	// default. Center either way so a restored size still opens on-screen.
+	w, h := float32(760), float32(600)
+	if a.window != nil {
+		if sw, sh, ok := a.window.WindowSize(); ok && sw > 0 && sh > 0 {
+			w, h = sw, sh
+		}
+	}
+	a.win.Resize(fyne.NewSize(w, h))
 	a.win.CenterOnScreen()
 
 	// Closing the window hides to tray rather than quitting, so the soundboard
-	// and hotkeys keep running in the background.
-	a.win.SetCloseIntercept(func() { a.win.Hide() })
+	// and hotkeys keep running in the background. Record the current size first so
+	// it is persisted on the next settings Save (window close or app quit).
+	a.win.SetCloseIntercept(func() {
+		a.recordWindowSize()
+		a.win.Hide()
+	})
 
 	// System tray (desktop driver only). The menu controls show/quit; the icon
 	// itself reopens the window on click via SetSystemTrayWindow.
@@ -150,9 +192,25 @@ func (a *App) ShowWindow() {
 }
 
 // quit really exits the application (the tray "Quit" item). Window close only
-// hides; this is the single path that ends the process.
+// hides; this is the single path that ends the process. It records the final
+// window size first so it is persisted by main's deferred settings Save.
 func (a *App) quit() {
+	a.recordWindowSize()
 	if a.fyneApp != nil {
 		a.fyneApp.Quit()
+	}
+}
+
+// recordWindowSize pushes the current window content size into the WindowStore
+// (if any) so it is persisted on the next settings Save. No-op when no store is
+// attached or the window has not been built. Uses the canvas size, which is the
+// content size Resize takes, so a later restore round-trips.
+func (a *App) recordWindowSize() {
+	if a.window == nil || a.win == nil {
+		return
+	}
+	sz := a.win.Canvas().Size()
+	if sz.Width > 0 && sz.Height > 0 {
+		a.window.SetWindowSize(sz.Width, sz.Height)
 	}
 }

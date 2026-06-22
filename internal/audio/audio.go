@@ -215,6 +215,12 @@ func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 	}
 	freeCPtr(&e.micIDPtr)
 	freeCPtr(&e.cableIDPtr)
+	// The Uninit above synchronously waits for the duplex callback to finish, so
+	// no callback owns e.cursors here. Drop the leftover cursors and drain the
+	// pending queue so a re-Configure starts from a clean cursor list instead of
+	// resuming old cursors from their stale positions on the new device.
+	e.cursors = nil
+	drainPending(e.pending)
 
 	e.mic = mic
 	e.cable = cable
@@ -266,9 +272,13 @@ func (e *Engine) SetMonitor(dev *devices.Device) error {
 		e.monitorDev = nil
 	}
 	freeCPtr(&e.monIDPtr)
-	// Drain any clips queued for the now-defunct monitor so a re-enable starts
-	// clean. (The monitor callback is no longer running to drain them.)
+	// Drain any clips queued for the now-defunct monitor AND drop its cursor
+	// slice so a re-enable starts clean. The Uninit above synchronously waits for
+	// the monitor callback to finish, so no callback owns monCursors here; without
+	// this, a re-enabled monitor would resume the old cursors from their stale
+	// positions, replaying partial clips as an audible glitch.
 	drainPending(e.monPending)
+	e.monCursors = nil
 
 	if dev == nil {
 		return nil
@@ -387,7 +397,17 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 	// Clamp the per-clip gain to the same [0, maxGain] range as the mic/master
 	// gains, then fold in the master gain captured now so later master changes
 	// do not retroactively alter sounds already in flight.
-	pc := pendingClip{clip: clip, gain: clampGain(gain) * e.masterGain()}
+	g := clampGain(gain) * e.masterGain()
+	// A zero effective gain (master muted, or per-clip muted) is pure silence:
+	// drop the trigger instead of enqueuing it. This both saves a mix slot and
+	// upholds gainOf's "zero == unity" convention — that sentinel is only safe
+	// because a genuinely-silent clip is never handed to a callback. Without this
+	// guard a master gain of 0 would reach drainInto as gain:0 and gainOf would
+	// remap it to unity, playing a "muted" clip at FULL volume.
+	if g == 0 {
+		return
+	}
+	pc := pendingClip{clip: clip, gain: g}
 	select {
 	case e.pending <- pc:
 	default:

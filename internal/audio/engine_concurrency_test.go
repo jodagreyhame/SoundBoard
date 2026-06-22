@@ -89,6 +89,44 @@ func TestTriggerCallbackHandoffNoRace(t *testing.T) {
 	e.Trigger("does/not-exist")
 }
 
+// TestSetMonitorResetsCursors confirms SetMonitor(nil) drops the monitor cursor
+// slice so a later re-enable does not resume stale, partially-played cursors.
+// No real device is involved: we plant cursors directly and tear the (nil)
+// monitor down. SetMonitor(nil) returns before opening any device, so the
+// teardown path that resets monCursors is exercised without hardware.
+func TestSetMonitorResetsCursors(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.monCursors = []*clipCursor{{pcm: flat(0.3, fadeFrames*4)}}
+	if err := e.SetMonitor(nil); err != nil {
+		t.Fatalf("SetMonitor(nil): %v", err)
+	}
+	if e.monCursors != nil {
+		t.Fatalf("SetMonitor(nil) must clear monCursors, got %d", len(e.monCursors))
+	}
+}
+
+// TestStopResetsCursors confirms Stop drops BOTH cursor slices and drains both
+// pending queues. Stop is hardware-free when no device was configured, so it
+// exercises the same callback-owned-slice reset that Configure/SetMonitor rely
+// on after teardown.
+func TestStopResetsCursors(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.cursors = []*clipCursor{{pcm: flat(0.3, fadeFrames*4)}}
+	e.monCursors = []*clipCursor{{pcm: flat(0.3, fadeFrames*4)}}
+	e.pending <- pendingClip{}
+	e.monPending <- pendingClip{}
+
+	if err := e.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if e.cursors != nil || e.monCursors != nil {
+		t.Fatalf("Stop must clear both cursor slices, got %d/%d", len(e.cursors), len(e.monCursors))
+	}
+	if len(e.pending) != 0 || len(e.monPending) != 0 {
+		t.Fatalf("Stop must drain both pending queues, got %d/%d", len(e.pending), len(e.monPending))
+	}
+}
+
 // TestTriggerDropsWhenFull confirms Trigger never blocks even if the pending
 // queue is saturated (the callbacks may be stalled). It returns promptly and
 // drops the overflow rather than blocking the calling goroutine.

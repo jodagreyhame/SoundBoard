@@ -24,6 +24,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/gen2brain/malgo"
 
@@ -92,9 +93,29 @@ func main() {
 		log.Printf("VB-CABLE not detected. Install from %s", setup.DownloadURL())
 	}
 
-	// Resolve the REAL mic to capture and the cable to play into. The engine
-	// captures the user's previous default mic (PreviousDefaultMic once routing
-	// is engaged), never the cable.
+	// The setup controller owns the engage/restore state the UI banner reads and
+	// the action button drives. Build it up front so we can auto-engage routing
+	// before resolving the mic (engaging hijacks the default capture endpoint, so
+	// the engine must capture the PREVIOUS default, not the cable).
+	setupCtl := &setupController{status: status}
+
+	// Auto-engage routing at startup when the cable is present, so Discord needs
+	// ZERO changes immediately rather than waiting for a manual button press.
+	// EngageRouting saves and later restores the user's real default mic; we defer
+	// that restore so the system-wide default capture endpoint is always put back
+	// on quit (even on the degraded/early-exit paths below).
+	defer setupCtl.Restore()
+	if status.CanEngage {
+		if err := setupCtl.Engage(); err != nil {
+			log.Printf("auto-engage routing: %v (you can retry from the window banner)", err)
+		} else {
+			log.Printf("routing engaged: Windows default mic now points at CABLE Output (restored on quit)")
+		}
+	}
+
+	// Resolve the REAL mic to capture and the cable to play into. Once routing is
+	// engaged the Windows default capture endpoint IS the cable, so prefer the
+	// previous default mic that EngageRouting saved; never capture the cable.
 	mic, micOK := resolveMic(capture, settings.MicName)
 	cable, cableOK := resolveCable(playback, settings.CableName)
 	if !micOK {
@@ -142,11 +163,13 @@ func main() {
 		}
 	}()
 
-	// Build the controllers the UI talks to, then run the Fyne main loop
-	// (blocks until Quit).
+	// Build the remaining controller the UI talks to, then run the Fyne main loop
+	// (blocks until Quit). setupCtl was built earlier so routing could auto-engage
+	// before mic resolution. The window store restores/persists the last window
+	// size via the deferred settings Save above.
 	vol := &volController{engine: engine, settings: settings}
-	setupCtl := &setupController{status: status}
-	app := ui.New(lib, engine, vol, setupCtl)
+	app := ui.New(lib, engine, vol, setupCtl).
+		WithWindowStore(&winController{settings: settings})
 	app.Run()
 }
 
@@ -181,7 +204,25 @@ var (
 	_ ui.Player           = (*audio.Engine)(nil)
 	_ ui.VolumeController = (*volController)(nil)
 	_ ui.SetupController  = (*setupController)(nil)
+	_ ui.WindowStore      = (*winController)(nil)
 )
+
+// winController adapts config.WindowPrefs to ui.WindowStore: the UI reads the
+// saved size on build and writes the latest size back here, which is persisted
+// by main's deferred settings.Save(). It satisfies ui.WindowStore.
+type winController struct {
+	settings *config.Settings
+}
+
+func (w *winController) WindowSize() (float32, float32, bool) {
+	p := w.settings.Window
+	return p.Width, p.Height, p.Width > 0 && p.Height > 0
+}
+
+func (w *winController) SetWindowSize(width, height float32) {
+	w.settings.Window.Width = width
+	w.settings.Window.Height = height
+}
 
 // volController adapts the engine + settings to ui.VolumeController. Setters
 // push the new level to the engine and persist it in settings; getters seed the
@@ -212,15 +253,31 @@ func (v *volController) Mic() float32           { return orUnity(v.settings.Volu
 func (v *volController) Master() float32        { return orUnity(v.settings.Volumes.Master) }
 func (v *volController) Clip(id string) float32 { return clipGain(v.settings, id) }
 
-// setupController adapts internal/setup to ui.SetupController. It satisfies
-// ui.SetupController.
+// setupController adapts internal/setup to ui.SetupController. It tracks not just
+// whether the cable is PRESENT (status.CanEngage) but whether routing has been
+// ENGAGED, and captures the restore closure returned by EngageRouting so the
+// user's default mic can be put back on quit. It satisfies ui.SetupController.
 type setupController struct {
-	status setup.Status
+	mu      sync.Mutex
+	status  setup.Status
+	engaged bool
+	restore func() // reverts the default mic; nil until Engage succeeds
 }
 
+// Status reports ready only when routing is actually ENGAGED (the Windows
+// default mic is pointed at CABLE Output), not merely when the cable exists.
+// Reporting ready on cable-present alone would make the banner claim "routing
+// active" while Discord still hears the real mic.
 func (s *setupController) Status() (bool, string) {
+	s.mu.Lock()
+	engaged := s.engaged
+	s.mu.Unlock()
+
+	if engaged {
+		return true, "Discord hears the soundboard — no Discord changes needed"
+	}
 	if s.status.CanEngage {
-		return true, "VB-CABLE detected — routing ready"
+		return false, "VB-CABLE detected — click Engage routing"
 	}
 	if s.status.CableInputPresent {
 		return false, "VB-CABLE Input found, but CABLE Output is missing"
@@ -228,11 +285,39 @@ func (s *setupController) Status() (bool, string) {
 	return false, "VB-CABLE NOT detected — click Install / Fix routing"
 }
 
+// CanEngage reports whether both cable endpoints are present so routing can be
+// engaged without installing.
+func (s *setupController) CanEngage() bool { return s.status.CanEngage }
+
 func (s *setupController) Install() error { return setup.InstallCable(nil) }
 
+// Engage points the Windows default mic at CABLE Output and STORES the restore
+// closure so main can revert it on quit. Without capturing restore, the user's
+// system-wide default microphone would stay on CABLE Output forever after the
+// app exits.
 func (s *setupController) Engage() error {
-	_, err := setup.EngageRouting()
-	return err
+	restore, err := setup.EngageRouting()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.restore = restore
+	s.engaged = true
+	s.mu.Unlock()
+	return nil
+}
+
+// Restore reverts the default-mic hijack if routing was engaged. Safe to call
+// when not engaged (no-op). main defers this so the real mic is always put back.
+func (s *setupController) Restore() {
+	s.mu.Lock()
+	restore := s.restore
+	s.restore = nil
+	s.engaged = false
+	s.mu.Unlock()
+	if restore != nil {
+		restore()
+	}
 }
 
 // soundsRoot locates the directory that contains the sounds/ folder and returns
@@ -261,10 +346,17 @@ func soundsRoot() (fs.FS, string) {
 }
 
 func resolveMic(capture []devices.Device, name string) (devices.Device, bool) {
+	// An explicit saved mic name always wins.
 	if name != "" {
 		if d, ok := devices.FindByName(capture, name); ok {
 			return d, true
 		}
+	}
+	// If routing was engaged, the live Windows default capture endpoint is now
+	// the cable — capturing it would feed the cable back into itself. Prefer the
+	// real mic that EngageRouting saved BEFORE the hijack.
+	if d, ok := setup.PreviousDefaultMic(); ok {
+		return d, true
 	}
 	return devices.DefaultMic(capture)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,45 @@ var cableDownloadURLs = []string{
 // run it with "-i -h": -i installs the driver, -h runs headless (no GUI). A
 // reboot is typically required before the CABLE Input/Output endpoints appear.
 const setupExeName = "VBCABLE_Setup_x64.exe"
+
+// allowedDownloadHost is the ONLY host the driver-pack download (and every
+// redirect hop) may resolve to. The extracted installer is run ELEVATED, so the
+// bytes must originate from VB-Audio's own CDN over TLS — never a redirected or
+// hijacked host. Enforced at request time and on every redirect, not just by the
+// static URL list (which a 30x could otherwise bypass).
+const allowedDownloadHost = "download.vb-audio.com"
+
+// ErrUnsafeDownload means the download URL — or a redirect target — was not
+// HTTPS on the expected VB-Audio host, so it was refused before any bytes were
+// written. Surfaced distinctly from a plain network failure.
+var ErrUnsafeDownload = errors.New("setup: refused unsafe VB-CABLE download (must be HTTPS on " + allowedDownloadHost + ")")
+
+// validateDownloadURL rejects any URL that is not HTTPS on allowedDownloadHost.
+// Host comparison is case-insensitive and ignores any port. Used both for the
+// initial request and for every redirect hop.
+func validateDownloadURL(u *url.URL) error {
+	if u == nil || !strings.EqualFold(u.Scheme, "https") || !strings.EqualFold(u.Hostname(), allowedDownloadHost) {
+		got := "<nil>"
+		if u != nil {
+			got = u.Scheme + "://" + u.Host
+		}
+		return fmt.Errorf("%w: got %s", ErrUnsafeDownload, got)
+	}
+	return nil
+}
+
+// safeHTTPClient is an http.Client whose CheckRedirect re-validates every
+// redirect target against validateDownloadURL, so a 30x to an arbitrary host can
+// never redirect the elevated-installer download off VB-Audio's CDN. It also
+// bounds the hop count.
+var safeHTTPClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("setup: too many redirects")
+		}
+		return validateDownloadURL(req.URL)
+	},
+}
 
 // downloadTimeout bounds the whole download; the zip is ~1.3 MB so this is
 // generous. installWait bounds how long we wait for the elevated installer.
@@ -92,19 +132,36 @@ func downloadAny(ctx context.Context, urls []string, dst string) error {
 	return fmt.Errorf("%w: %v", ErrNoNetwork, lastErr)
 }
 
-// downloadOne fetches url into dst, failing on any non-2xx status.
-func downloadOne(ctx context.Context, url, dst string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// downloadOne fetches rawURL into dst, failing on any non-2xx status. The URL
+// and every redirect hop are validated to be HTTPS on the expected VB-Audio
+// host before any bytes are written, because the downloaded payload is run
+// elevated — we never fetch the installer from an arbitrary (redirected or
+// hijacked) host.
+func downloadOne(ctx context.Context, rawURL, dst string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("setup: parse download URL: %w", err)
+	}
+	if err := validateDownloadURL(parsed); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := safeHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	// Defense in depth: confirm the final responding URL is still the expected
+	// host/scheme even if CheckRedirect's contract ever changed.
+	if err := validateDownloadURL(resp.Request.URL); err != nil {
+		return err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("download %s: status %d", url, resp.StatusCode)
+		return fmt.Errorf("download %s: status %d", rawURL, resp.StatusCode)
 	}
 
 	f, err := os.Create(dst)

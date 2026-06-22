@@ -61,9 +61,16 @@ func (a *App) buildSetupBanner() fyne.CanvasObject {
 	text.TextStyle = fyne.TextStyle{Bold: true}
 	left := container.NewHBox(widget.NewIcon(icon), text)
 
+	// When routing is not yet ready, offer the appropriate next action: if the
+	// cable is present we can Engage routing directly; otherwise we must Install
+	// VB-CABLE first. The label reflects which one onFixRouting will run.
 	var right fyne.CanvasObject
 	if !ready {
-		btn := widget.NewButtonWithIcon("Install / Fix audio routing", theme.DownloadIcon(), a.onFixRouting)
+		label := "Install / Fix audio routing"
+		if a.setup != nil && a.setup.CanEngage() {
+			label = "Engage routing"
+		}
+		btn := widget.NewButtonWithIcon(label, theme.DownloadIcon(), a.onFixRouting)
 		btn.Importance = widget.WarningImportance
 		right = btn
 	}
@@ -72,19 +79,25 @@ func (a *App) buildSetupBanner() fyne.CanvasObject {
 	return container.NewVBox(container.NewPadded(row), widget.NewSeparator())
 }
 
-// onFixRouting runs the (already-ready Engage, or not-ready Install) action in a
-// goroutine with an infinite-progress dialog, then reports the result.
+// onFixRouting runs the next setup action in a goroutine with an infinite-
+// progress dialog, then reports the result. If the cable is already present it
+// ENGAGES routing (points Discord's default mic at CABLE Output); otherwise it
+// INSTALLS VB-CABLE. The choice keys on CanEngage, NOT on Status's ready flag —
+// ready means "engaged", which is false in both the install-needed and
+// engage-needed states, so keying on ready would make the Engage path
+// unreachable.
 func (a *App) onFixRouting() {
 	if a.setup == nil || a.win == nil {
 		return
 	}
-	ready, _ := a.setup.Status()
+	engaging := a.setup.CanEngage()
+
 	title := "Installing VB-CABLE"
 	msg := "Downloading and installing the virtual audio cable. Approve the Windows elevation prompt if it appears…"
 	op := a.setup.Install
-	if ready {
-		title = "Fixing routing"
-		msg = "Re-pointing Discord's microphone to CABLE Output…"
+	if engaging {
+		title = "Engaging routing"
+		msg = "Pointing Discord's microphone at CABLE Output…"
 		op = a.setup.Engage
 	}
 
@@ -98,8 +111,18 @@ func (a *App) onFixRouting() {
 				dialog.ShowError(fmt.Errorf("%s failed: %w", strings.ToLower(title), err), a.win)
 				return
 			}
-			dialog.ShowInformation("Done",
-				"Audio routing updated. Restart SoundBoard if clips are not yet heard in Discord.", a.win)
+			if engaging {
+				// Routing is now live; the banner flips to the success state.
+				dialog.ShowInformation("Routing engaged",
+					"Discord now hears the soundboard automatically — no changes needed inside Discord. "+
+						"Your real microphone is restored when you quit SoundBoard.", a.win)
+			} else {
+				// VB-CABLE almost always needs a full Windows reboot before its
+				// endpoints enumerate; an app-only restart is not enough.
+				dialog.ShowInformation("VB-CABLE installed — reboot required",
+					"VB-CABLE was installed. Reboot Windows, then relaunch SoundBoard. "+
+						"The virtual cable will NOT appear until you restart your PC.", a.win)
+			}
 			a.refreshBanner()
 		})
 	}()

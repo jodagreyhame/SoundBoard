@@ -161,6 +161,48 @@ func TestTriggerGainCapturesMasterTimesClip(t *testing.T) {
 	}
 }
 
+// TestMasterMuteDropsTrigger guards the master-mute path: with the master gain
+// at 0 the effective per-cursor gain is 0, which must DROP the trigger rather
+// than enqueue a gain:0 cursor (which gainOf would remap to unity and play at
+// full volume). No cursor should reach the pending channel.
+func TestMasterMuteDropsTrigger(t *testing.T) {
+	lib, err := catalog.New(fstest.MapFS{
+		"sounds/test/clip.wav": {Data: []byte("not decoded")},
+	})
+	if err != nil {
+		t.Fatalf("catalog.New: %v", err)
+	}
+	const id = "test/clip"
+	clip := lib.Get(id)
+	if clip == nil {
+		t.Fatalf("clip %q not indexed", id)
+	}
+	clip.PCM = flat(0.9, fadeFrames*4)
+
+	e := NewEngine(nil, lib)
+	e.SetMasterGain(0) // mute master
+
+	// Even a unity per-clip gain folds to 0 * 1 = 0 and must be dropped.
+	e.TriggerGain(id, 1)
+	if cursors := drainInto(e.pending, nil); len(cursors) != 0 {
+		t.Fatalf("master-muted trigger enqueued %d cursor(s); want 0 (silence)", len(cursors))
+	}
+
+	// A per-clip gain of 0 is likewise silence and must be dropped even when
+	// master is at unity.
+	e.SetMasterGain(1)
+	e.TriggerGain(id, 0)
+	if cursors := drainInto(e.pending, nil); len(cursors) != 0 {
+		t.Fatalf("zero per-clip trigger enqueued %d cursor(s); want 0", len(cursors))
+	}
+
+	// Sanity: a non-zero product still enqueues exactly one cursor.
+	e.TriggerGain(id, 0.5)
+	if cursors := drainInto(e.pending, nil); len(cursors) != 1 {
+		t.Fatalf("audible trigger enqueued %d cursor(s); want 1", len(cursors))
+	}
+}
+
 // TestGainStillClamps confirms that boosting a clip past unity does not break
 // the [-1,1] output clamp: clip 0.9 * gain 1.5 == 1.35 -> clamped to 1.0.
 func TestGainStillClamps(t *testing.T) {
