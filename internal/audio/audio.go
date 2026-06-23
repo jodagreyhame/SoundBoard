@@ -147,6 +147,16 @@ type Engine struct {
 	// contends with the lifecycle lock.
 	monitorActive atomic.Bool
 
+	// stopFlag / monStopFlag are one-shot "stop everything" signals raised by
+	// StopAll (a non-RT goroutine) and consumed by the owning RT callback. Each
+	// callback CompareAndSwaps its flag from true->false at the top of a buffer
+	// and, on success, drops every active cursor AND discards anything still
+	// queued in its pending channel, so playback halts within one buffer without
+	// the callback ever taking a lock or allocating. Atomic so StopAll never
+	// contends with the lifecycle lock or the RT path.
+	stopFlag    atomic.Bool
+	monStopFlag atomic.Bool
+
 	// micGainBits / masterGainBits / monitorGainBits hold three INDEPENDENT
 	// levels as float32 bit patterns, written by the UI thread and read lock-free
 	// by the RT callbacks so volume changes take effect without touching ctrlMu:
@@ -450,6 +460,20 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 	}
 }
 
+// StopAll immediately silences every clip currently playing on BOTH the duplex
+// (-> Discord) and monitor (-> headset) paths. It is the UI "Stop" button's
+// action. StopAll itself only raises two atomic flags; the actual cursor drop
+// and pending-queue discard happen inside each RT callback (see clearOnStop), so
+// no lock or allocation is taken on the audio thread and a clip is never
+// corrupted mid-write — the callback owns its cursor slice exclusively and clears
+// it at a buffer boundary. Safe to call from any goroutine. The mic passthrough
+// is unaffected: only triggered clips are stopped, the user's live voice keeps
+// flowing to Discord.
+func (e *Engine) StopAll() {
+	e.stopFlag.Store(true)
+	e.monStopFlag.Store(true)
+}
+
 // duplexCallback is the real-time mixer for the mic->cable path (what Discord
 // hears). It drains any newly-triggered clips into its own cursor slice, then
 // sums the live mic input with every active clip cursor — scaling the clips by
@@ -458,6 +482,7 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 // The master gain is read once per buffer via a single atomic load.
 func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	e.cursors = drainInto(e.pending, e.cursors)
+	e.cursors = clearOnStop(&e.stopFlag, e.cursors, e.pending)
 
 	out := bytesAsF32(pOutput)
 	mic := bytesAsF32(pInput)
@@ -483,6 +508,7 @@ func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 	_ = pInput
 	e.monCursors = drainInto(e.monPending, e.monCursors)
+	e.monCursors = clearOnStop(&e.monStopFlag, e.monCursors, e.monPending)
 
 	out := bytesAsF32(pOutput)
 	n := int(frameCount) * channels
@@ -505,6 +531,22 @@ func drainInto(ch <-chan pendingClip, cursors []*clipCursor) []*clipCursor {
 			return cursors
 		}
 	}
+}
+
+// clearOnStop consumes a one-shot stop flag for an RT callback: if the flag was
+// set (CompareAndSwap true->false), it truncates the callback's cursor slice to
+// length zero — reusing the same backing array, so no allocation — AND drains any
+// clip still sitting in the pending channel, so a clip that was queued but had
+// not yet become a cursor is discarded too. The result is that within one buffer
+// nothing is playing and nothing pending will start. When the flag is clear this
+// is a single atomic load and the slice is returned untouched. Allocation-free
+// and lock-free; only ever called by the callback that owns `cursors`.
+func clearOnStop(flag *atomic.Bool, cursors []*clipCursor, pending chan pendingClip) []*clipCursor {
+	if !flag.CompareAndSwap(true, false) {
+		return cursors
+	}
+	drainPending(pending)
+	return cursors[:0]
 }
 
 // drainPending empties a pending channel without consuming into cursors. Used

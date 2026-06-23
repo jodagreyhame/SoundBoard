@@ -151,23 +151,36 @@ func (a *App) refreshBanner() {
 }
 
 // buildClipBrowser builds the search box and the scrollable, category-grouped
-// sections of clip buttons. Live filtering re-renders the sections on every
-// keystroke; it stays usable for 200+ clips because the sections live inside a
-// single vertical scroll and empty categories are dropped.
+// sections of clip buttons. A pinned "★ Favourites" section sits above the
+// categories. Live filtering re-renders every section (including favourites) on
+// each keystroke; it stays usable for 200+ clips because the sections live inside
+// a single vertical scroll and empty categories are dropped. A prominent "Stop"
+// button sits in the search row to silence all playing clips at once.
 func (a *App) buildClipBrowser() fyne.CanvasObject {
 	search := widget.NewEntry()
 	search.SetPlaceHolder("Search clips by name or category…")
 	search.SetText(a.search)
 
+	// favSection holds the pinned favourites; it is hidden when empty/filtered out.
+	favSection := container.NewVBox()
 	sections := container.NewVBox()
 	empty := widget.NewLabel("No clips match your search.")
 	empty.Alignment = fyne.TextAlignCenter
 	empty.Hide()
 
 	a.rebuildBrowser = func() {
+		favSection.RemoveAll()
+		favShown := a.renderFavorites(favSection)
+		if favShown == 0 {
+			favSection.Hide()
+		} else {
+			favSection.Show()
+		}
+		favSection.Refresh()
+
 		sections.RemoveAll()
 		shown := a.renderSections(sections)
-		if shown == 0 {
+		if shown == 0 && favShown == 0 {
 			empty.Show()
 		} else {
 			empty.Hide()
@@ -181,13 +194,54 @@ func (a *App) buildClipBrowser() fyne.CanvasObject {
 	}
 	a.rebuildBrowser()
 
-	body := container.NewVScroll(container.NewVBox(sections, empty))
-	header := container.NewBorder(nil, nil, widget.NewIcon(theme.SearchIcon()), nil, search)
+	// Stop button: a prominent, danger-coloured "stop all sounds" action.
+	stop := widget.NewButtonWithIcon("Stop", theme.MediaStopIcon(), func() {
+		if a.player != nil {
+			a.player.StopAll()
+		}
+	})
+	stop.Importance = widget.DangerImportance
+
+	body := container.NewVScroll(container.NewVBox(favSection, sections, empty))
+	// search box fills the row; the search icon hugs the left and the Stop button
+	// the right so it is always reachable above the scrolling clip list.
+	header := container.NewBorder(nil, nil, widget.NewIcon(theme.SearchIcon()), stop, search)
 	return container.NewBorder(container.NewPadded(header), nil, nil, nil, body)
 }
 
+// renderFavorites appends the pinned "★ Favourites" section listing the
+// favourited clips (in Favorites() order) that pass the current filter, and
+// returns how many were shown. Returns 0 (and adds nothing) when there is no
+// FavoritesController or no matching favourites, so the caller can hide the
+// section. Each entry is the same play-button-plus-star cell as the categories.
+func (a *App) renderFavorites(into *fyne.Container) int {
+	if a.favs == nil || a.lib == nil {
+		return 0
+	}
+	var cells []fyne.CanvasObject
+	for _, id := range a.favs.Favorites() {
+		clip := a.lib.Get(id)
+		if clip == nil {
+			continue // a favourited clip whose file was removed: skip silently
+		}
+		if !match(clip, a.search) {
+			continue
+		}
+		cells = append(cells, a.clipCell(clip))
+	}
+	if len(cells) == 0 {
+		return 0
+	}
+	title := widget.NewLabelWithStyle(
+		fmt.Sprintf("★ Favourites  (%d)", len(cells)),
+		fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	grid := container.NewGridWrap(clipButtonSize, cells...)
+	into.Add(container.NewVBox(title, grid, widget.NewSeparator()))
+	return len(cells)
+}
+
 // renderSections appends one labelled category section per non-empty,
-// filter-matching category and returns how many clip buttons were shown total.
+// filter-matching category and returns how many clip cells were shown total.
 func (a *App) renderSections(into *fyne.Container) int {
 	if a.lib == nil {
 		return 0
@@ -195,38 +249,64 @@ func (a *App) renderSections(into *fyne.Container) int {
 	total := 0
 	for i := range a.lib.Categories {
 		cat := &a.lib.Categories[i]
-		buttons := a.categoryButtons(cat)
-		if len(buttons) == 0 {
+		cells := a.categoryButtons(cat)
+		if len(cells) == 0 {
 			continue
 		}
-		total += len(buttons)
+		total += len(cells)
 
 		title := widget.NewLabelWithStyle(
-			fmt.Sprintf("%s  (%d)", prettyCategory(cat.Name), len(buttons)),
+			fmt.Sprintf("%s  (%d)", prettyCategory(cat.Name), len(cells)),
 			fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		grid := container.NewGridWrap(clipButtonSize, buttons...)
+		grid := container.NewGridWrap(clipButtonSize, cells...)
 		into.Add(container.NewVBox(title, grid, widget.NewSeparator()))
 	}
 	return total
 }
 
-// categoryButtons builds the play buttons for the clips in cat that pass the
-// current filter. Each button taps to play at the clip's saved per-clip gain and
-// selects the clip into the per-clip volume slider.
+// categoryButtons builds the clip cells for the clips in cat that pass the
+// current filter. Each cell is a play button plus a compact star toggle.
 func (a *App) categoryButtons(cat *catalog.Category) []fyne.CanvasObject {
-	var buttons []fyne.CanvasObject
+	var cells []fyne.CanvasObject
 	for _, clip := range cat.Clips {
 		if !match(clip, a.search) {
 			continue
 		}
-		c := clip // capture per-iteration
-		btn := widget.NewButtonWithIcon(c.Name, theme.MediaPlayIcon(), func() {
-			a.play(c)
-		})
-		btn.Alignment = widget.ButtonAlignLeading
-		buttons = append(buttons, btn)
+		cells = append(cells, a.clipCell(clip))
 	}
-	return buttons
+	return cells
+}
+
+// clipCell builds one grid cell: a leading-aligned play button (taps to play at
+// the clip's saved per-clip gain and selects it into the per-clip slider) plus a
+// compact star toggle on the right. The star shows ★ when favourited and ☆ when
+// not; tapping it toggles the favourite and re-renders the browser so both the
+// star state and the pinned Favourites section update live. When no
+// FavoritesController is attached the cell is just the play button.
+func (a *App) clipCell(clip *catalog.Clip) fyne.CanvasObject {
+	c := clip // capture per-iteration
+	play := widget.NewButtonWithIcon(c.Name, theme.MediaPlayIcon(), func() {
+		a.play(c)
+	})
+	play.Alignment = widget.ButtonAlignLeading
+
+	if a.favs == nil {
+		return play
+	}
+
+	label := "☆"
+	if a.favs.IsFavorite(c.ID) {
+		label = "★"
+	}
+	star := widget.NewButton(label, func() {
+		a.favs.ToggleFavorite(c.ID)
+		if a.rebuildBrowser != nil {
+			a.rebuildBrowser()
+		}
+	})
+	star.Importance = widget.LowImportance
+	// Star on the right; the play button takes the remaining width.
+	return container.NewBorder(nil, nil, nil, star, play)
 }
 
 // play triggers a clip at its saved per-clip gain and selects it for the

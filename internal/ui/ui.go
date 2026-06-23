@@ -37,6 +37,24 @@ type Player interface {
 	// TriggerGain plays the clip id at the given linear gain (1.0 = the clip's
 	// own configured per-clip volume * master, unchanged).
 	TriggerGain(id string, gain float32)
+	// StopAll immediately silences every clip currently playing on both the
+	// duplex (-> Discord) and monitor (-> headset) paths. The user's live mic
+	// passthrough is unaffected. Drives the window's "Stop" button.
+	StopAll()
+}
+
+// FavoritesController is the UI's view of the user's favourited clips. The UI
+// uses it to render a star toggle on every clip and a pinned "★ Favourites"
+// section at the top of the browser. main.go wires it to config.Settings so a
+// toggle mutates the persisted favourites list (saved on exit).
+type FavoritesController interface {
+	// IsFavorite reports whether the clip id is currently favourited.
+	IsFavorite(id string) bool
+	// ToggleFavorite flips the favourite state of clip id, adding it (appended to
+	// the end) when it was not favourited and removing it otherwise.
+	ToggleFavorite(id string)
+	// Favorites returns the favourited clip IDs in pinned display order.
+	Favorites() []string
 }
 
 // VolumeController is the UI's view of the mixer. Setters push a new level into
@@ -103,6 +121,10 @@ type App struct {
 	// window persists/restores the main window size. Optional; nil = default size.
 	window WindowStore
 
+	// favs is the favourites view-model: star toggles and the pinned Favourites
+	// section read it. Optional; nil = no favourites UI (stars/section hidden).
+	favs FavoritesController
+
 	fyneApp fyne.App
 	win     fyne.Window
 
@@ -139,6 +161,15 @@ func New(lib *catalog.Library, player Player, vol VolumeController, setup SetupC
 // Call before Run/build.
 func (a *App) WithWindowStore(w WindowStore) *App {
 	a.window = w
+	return a
+}
+
+// WithFavorites attaches an optional FavoritesController so each clip gets a star
+// toggle and a pinned "★ Favourites" section is shown at the top of the browser.
+// When nil the favourites UI is omitted entirely. Returns the App for chaining.
+// Call before Run/build.
+func (a *App) WithFavorites(f FavoritesController) *App {
+	a.favs = f
 	return a
 }
 

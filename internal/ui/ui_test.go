@@ -8,6 +8,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
+	"fyne.io/fyne/v2/widget"
 
 	"soundboard/internal/catalog"
 )
@@ -15,17 +16,46 @@ import (
 // emptyContainer returns a fresh empty VBox for renderSections to append into.
 func emptyContainer() *fyne.Container { return container.NewVBox() }
 
-// fakePlayer records every TriggerGain call.
+// fakePlayer records every TriggerGain and StopAll call.
 type fakePlayer struct {
-	lastID   string
-	lastGain float32
-	calls    int
+	lastID    string
+	lastGain  float32
+	calls     int
+	stopCalls int
 }
 
 func (f *fakePlayer) TriggerGain(id string, gain float32) {
 	f.lastID, f.lastGain = id, gain
 	f.calls++
 }
+
+func (f *fakePlayer) StopAll() { f.stopCalls++ }
+
+// fakeFavs is an in-memory FavoritesController preserving insertion order.
+type fakeFavs struct {
+	ids []string
+}
+
+func (f *fakeFavs) IsFavorite(id string) bool {
+	for _, x := range f.ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeFavs) ToggleFavorite(id string) {
+	for i, x := range f.ids {
+		if x == id {
+			f.ids = append(f.ids[:i], f.ids[i+1:]...)
+			return
+		}
+	}
+	f.ids = append(f.ids, id)
+}
+
+func (f *fakeFavs) Favorites() []string { return f.ids }
 
 // fakeVol is an in-memory VolumeController.
 type fakeVol struct {
@@ -268,6 +298,169 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met within timeout")
+}
+
+// TestFavoritesSectionRendersOnlyWhenNonEmpty verifies the pinned favourites
+// section reports 0 (so the browser hides it) with no favourites, and renders the
+// favourited clips in Favorites() order once some exist. The live search filter
+// must also narrow the favourites section.
+func TestFavoritesSectionRendersOnlyWhenNonEmpty(t *testing.T) {
+	a, _, _ := buildTestApp(t, &fakeSetup{})
+	favs := &fakeFavs{}
+	a.favs = favs
+
+	// No favourites -> nothing rendered.
+	if got := a.renderFavorites(emptyContainer()); got != 0 {
+		t.Fatalf("expected 0 favourite cells with no favourites, got %d", got)
+	}
+
+	// Two favourites -> both render unfiltered.
+	favs.ids = []string{"memes/airhorn", "effects/laser"}
+	if got := a.renderFavorites(emptyContainer()); got != 2 {
+		t.Fatalf("expected 2 favourite cells, got %d", got)
+	}
+
+	// Search filter narrows the favourites section too.
+	a.search = "airhorn"
+	if got := a.renderFavorites(emptyContainer()); got != 1 {
+		t.Fatalf("expected 1 favourite cell for 'airhorn', got %d", got)
+	}
+
+	// A favourited ID with no matching clip is skipped silently.
+	a.search = ""
+	favs.ids = []string{"memes/airhorn", "ghost/missing"}
+	if got := a.renderFavorites(emptyContainer()); got != 1 {
+		t.Fatalf("expected 1 favourite cell (missing clip skipped), got %d", got)
+	}
+}
+
+// TestFavoriteToggleAddsAndRemoves verifies the star toggle mutates the
+// controller and re-renders, and that the favourites section appears/disappears
+// in step with the favourite state.
+func TestFavoriteToggleAddsAndRemoves(t *testing.T) {
+	a, _, _ := buildTestApp(t, &fakeSetup{})
+	favs := &fakeFavs{}
+	a.favs = favs
+
+	const id = "memes/airhorn"
+	if favs.IsFavorite(id) {
+		t.Fatal("clip should not be favourited initially")
+	}
+	favs.ToggleFavorite(id)
+	if !favs.IsFavorite(id) {
+		t.Fatal("ToggleFavorite did not add the clip")
+	}
+	if got := a.renderFavorites(emptyContainer()); got != 1 {
+		t.Fatalf("favourited clip should render in the favourites section, got %d", got)
+	}
+	favs.ToggleFavorite(id)
+	if favs.IsFavorite(id) {
+		t.Fatal("second ToggleFavorite did not remove the clip")
+	}
+	if got := a.renderFavorites(emptyContainer()); got != 0 {
+		t.Fatalf("un-favourited clip should not render, got %d", got)
+	}
+
+	// rebuildBrowser must stay panic-free with a favourites controller attached.
+	a.rebuildBrowser()
+}
+
+// TestClipCellHasStarToggle verifies that with a FavoritesController attached the
+// grid cell exposes a tappable star button that toggles the favourite, and that
+// without one the cell is just the play button.
+func TestClipCellHasStarToggle(t *testing.T) {
+	a, _, _ := buildTestApp(t, &fakeSetup{})
+	clip := a.lib.Get("memes/airhorn")
+	if clip == nil {
+		t.Fatal("expected memes/airhorn clip in test library")
+	}
+
+	// No favourites controller -> cell is the bare play button.
+	a.favs = nil
+	if _, ok := a.clipCell(clip).(*widget.Button); !ok {
+		t.Fatal("with no favourites controller the cell should be a bare play button")
+	}
+
+	// With a controller -> cell contains a star button we can tap to favourite.
+	favs := &fakeFavs{}
+	a.favs = favs
+	cell := a.clipCell(clip)
+	star := findStarButton(cell)
+	if star == nil {
+		t.Fatal("clip cell should contain a star toggle button")
+	}
+	if star.Text != "☆" {
+		t.Fatalf("unfavourited star label = %q, want ☆", star.Text)
+	}
+	star.OnTapped()
+	if !favs.IsFavorite(clip.ID) {
+		t.Fatal("tapping the star did not favourite the clip")
+	}
+}
+
+// findStarButton walks an object tree and returns the first button whose label is
+// a star glyph (the favourite toggle), or nil.
+func findStarButton(o fyne.CanvasObject) *widget.Button {
+	var found *widget.Button
+	var walk func(fyne.CanvasObject)
+	walk = func(obj fyne.CanvasObject) {
+		if found != nil {
+			return
+		}
+		switch v := obj.(type) {
+		case *widget.Button:
+			if v.Text == "☆" || v.Text == "★" {
+				found = v
+			}
+		case *fyne.Container:
+			for _, c := range v.Objects {
+				walk(c)
+			}
+		}
+	}
+	walk(o)
+	return found
+}
+
+// TestStopButtonCallsStopAll verifies the prominent Stop button in the browser
+// header invokes Player.StopAll.
+func TestStopButtonCallsStopAll(t *testing.T) {
+	a, player, _ := buildTestApp(t, &fakeSetup{})
+	browser := a.buildClipBrowser()
+	stop := findStopButton(browser)
+	if stop == nil {
+		t.Fatal("clip browser should contain a Stop button")
+	}
+	stop.OnTapped()
+	if player.stopCalls != 1 {
+		t.Fatalf("Stop button should call StopAll once, got %d", player.stopCalls)
+	}
+}
+
+// findStopButton walks an object tree and returns the first button labelled
+// "Stop", or nil.
+func findStopButton(o fyne.CanvasObject) *widget.Button {
+	var found *widget.Button
+	var walk func(fyne.CanvasObject)
+	walk = func(obj fyne.CanvasObject) {
+		if found != nil {
+			return
+		}
+		switch v := obj.(type) {
+		case *widget.Button:
+			if v.Text == "Stop" {
+				found = v
+			}
+		case *fyne.Container:
+			for _, c := range v.Objects {
+				walk(c)
+			}
+		case *container.Scroll:
+			walk(v.Content)
+		}
+	}
+	walk(o)
+	return found
 }
 
 func TestBannerHandlesNilAndStatuses(t *testing.T) {

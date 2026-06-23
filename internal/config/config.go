@@ -30,6 +30,13 @@ type Settings struct {
 	// upgraded config without volumes round-trips to its prior shape.
 	Volumes Volumes `json:"volumes,omitempty"`
 
+	// Favorites is the ordered list of favourited clip IDs (canonically
+	// extensionless "<category>/<basename>"). The UI pins these at the top of the
+	// browser in this order. Omitted when empty so an upgraded config without
+	// favourites round-trips to its prior shape. normalize() guarantees this is a
+	// non-nil (possibly empty) slice so callers never nil-panic.
+	Favorites []string `json:"favorites,omitempty"`
+
 	// Window holds the Fyne main-window placement/size preferences so the app
 	// reopens where the user left it. Omitted when empty.
 	Window WindowPrefs `json:"window,omitempty"`
@@ -80,6 +87,9 @@ func (s *Settings) normalize() {
 	}
 	if s.Volumes.PerClip == nil {
 		s.Volumes.PerClip = map[string]float32{}
+	}
+	if s.Favorites == nil {
+		s.Favorites = []string{}
 	}
 }
 

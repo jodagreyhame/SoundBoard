@@ -127,6 +127,120 @@ func TestStopResetsCursors(t *testing.T) {
 	}
 }
 
+// TestStopAllConcurrentNoRace fires StopAll and Trigger from many goroutines
+// while both RT callbacks run continuously, proving StopAll is data-race-free
+// against the audio thread (run with -race). StopAll only stores atomics; the
+// callback consumes the flag and clears its OWN cursor slice, so there is no
+// shared mutable state to race on.
+func TestStopAllConcurrentNoRace(t *testing.T) {
+	e, id := newTestEngine(t)
+	e.monitorActive.Store(true)
+
+	stop := make(chan struct{})
+	var cbWG sync.WaitGroup
+	run := func(drain func()) {
+		defer cbWG.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				drain()
+			}
+		}
+	}
+	cbWG.Add(2)
+	go run(func() {
+		buf := make([]byte, periodFrames*channels*4)
+		mic := make([]byte, periodFrames*channels*4)
+		e.duplexCallback(buf, mic, periodFrames)
+	})
+	go run(func() {
+		buf := make([]byte, periodFrames*channels*4)
+		e.monitorCallback(buf, nil, periodFrames)
+	})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { // a producer firing clips
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			e.Trigger(id)
+		}
+	}()
+	go func() { // a stopper hammering StopAll concurrently
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			e.StopAll()
+		}
+	}()
+	wg.Wait()
+	close(stop)
+	cbWG.Wait()
+}
+
+// TestStopAllClearsCursors confirms StopAll halts playback within one buffer on
+// BOTH paths: after StopAll, a single run of each callback drops every active
+// cursor AND discards anything still queued in the pending channels (a clip that
+// was triggered but not yet turned into a cursor). The clear is callback-owned
+// and allocation/lock-free; here we drive it by hand with no real hardware.
+func TestStopAllClearsCursors(t *testing.T) {
+	e, id := newTestEngine(t)
+	e.monitorActive.Store(true)
+
+	// Plant active cursors directly on both paths.
+	e.cursors = []*clipCursor{{pcm: flat(0.3, fadeFrames*4)}}
+	e.monCursors = []*clipCursor{{pcm: flat(0.3, fadeFrames*4)}}
+	// And queue a clip on each pending channel that has NOT yet become a cursor.
+	e.Trigger(id) // enqueues to both pending and monPending (monitorActive)
+	if len(e.pending) == 0 || len(e.monPending) == 0 {
+		t.Fatalf("setup: expected a queued clip on each path, got %d/%d", len(e.pending), len(e.monPending))
+	}
+
+	e.StopAll()
+
+	// One buffer on each callback consumes the stop flag, drops cursors, and
+	// discards the queued clips.
+	dup := make([]byte, periodFrames*channels*4)
+	micbuf := make([]byte, periodFrames*channels*4)
+	mon := make([]byte, periodFrames*channels*4)
+	e.duplexCallback(dup, micbuf, periodFrames)
+	e.monitorCallback(mon, nil, periodFrames)
+
+	if len(e.cursors) != 0 {
+		t.Fatalf("StopAll should clear duplex cursors, got %d", len(e.cursors))
+	}
+	if len(e.monCursors) != 0 {
+		t.Fatalf("StopAll should clear monitor cursors, got %d", len(e.monCursors))
+	}
+	if len(e.pending) != 0 || len(e.monPending) != 0 {
+		t.Fatalf("StopAll should discard queued clips, got %d/%d", len(e.pending), len(e.monPending))
+	}
+
+	// The output buffers must be silent after the stop (no surviving cursor wrote
+	// any sample). Check a few frames.
+	out := bytesAsF32(dup)
+	for i := 0; i < len(out) && i < 16; i++ {
+		if out[i] != 0 {
+			t.Fatalf("duplex output sample %d = %v, want 0 after StopAll", i, out[i])
+		}
+	}
+}
+
+// TestStopAllNoOpWhenIdle confirms StopAll is harmless when nothing is playing:
+// the flags are consumed and the (empty) cursor slices stay empty, with no panic.
+func TestStopAllNoOpWhenIdle(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.StopAll()
+	dup := make([]byte, periodFrames*channels*4)
+	micbuf := make([]byte, periodFrames*channels*4)
+	e.duplexCallback(dup, micbuf, periodFrames)
+	e.monitorCallback(make([]byte, periodFrames*channels*4), nil, periodFrames)
+	if len(e.cursors) != 0 || len(e.monCursors) != 0 {
+		t.Fatalf("idle StopAll should leave cursors empty, got %d/%d", len(e.cursors), len(e.monCursors))
+	}
+}
+
 // TestTriggerDropsWhenFull confirms Trigger never blocks even if the pending
 // queue is saturated (the callbacks may be stalled). It returns promptly and
 // drops the overflow rather than blocking the calling goroutine.

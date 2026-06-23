@@ -192,7 +192,8 @@ func main() {
 	// size via the deferred settings Save above.
 	vol := &volController{engine: engine, settings: settings}
 	app := ui.New(lib, engine, vol, setupCtl).
-		WithWindowStore(&winController{settings: settings})
+		WithWindowStore(&winController{settings: settings}).
+		WithFavorites(&favController{settings: settings})
 	app.Run()
 }
 
@@ -226,11 +227,45 @@ func orUnity(g float32) float32 {
 // Compile-time checks that the wiring types satisfy the UI's interfaces, so a
 // signature drift fails the build here rather than silently.
 var (
-	_ ui.Player           = (*audio.Engine)(nil)
-	_ ui.VolumeController = (*volController)(nil)
-	_ ui.SetupController  = (*setupController)(nil)
-	_ ui.WindowStore      = (*winController)(nil)
+	_ ui.Player              = (*audio.Engine)(nil)
+	_ ui.VolumeController    = (*volController)(nil)
+	_ ui.SetupController     = (*setupController)(nil)
+	_ ui.WindowStore         = (*winController)(nil)
+	_ ui.FavoritesController = (*favController)(nil)
 )
+
+// favController adapts config.Settings.Favorites to ui.FavoritesController. A
+// toggle mutates the in-memory Favorites slice (added at the end when newly
+// favourited, removed otherwise); main's deferred settings.Save() persists it on
+// exit, matching how volumes/window size are saved. It satisfies
+// ui.FavoritesController.
+type favController struct {
+	settings *config.Settings
+}
+
+func (f *favController) IsFavorite(id string) bool {
+	for _, fid := range f.settings.Favorites {
+		if fid == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *favController) ToggleFavorite(id string) {
+	for i, fid := range f.settings.Favorites {
+		if fid == id {
+			// Remove: splice it out, preserving the order of the rest.
+			f.settings.Favorites = append(f.settings.Favorites[:i], f.settings.Favorites[i+1:]...)
+			return
+		}
+	}
+	f.settings.Favorites = append(f.settings.Favorites, id)
+}
+
+// Favorites returns the favourited clip IDs in their pinned display order. It
+// returns the live slice; the UI only reads it.
+func (f *favController) Favorites() []string { return f.settings.Favorites }
 
 // winController adapts config.WindowPrefs to ui.WindowStore: the UI reads the
 // saved size on build and writes the latest size back here, which is persisted

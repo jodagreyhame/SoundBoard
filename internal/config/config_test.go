@@ -53,6 +53,36 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if s.Volumes.PerClip == nil {
 		t.Error("Load() defaults: Volumes.PerClip should be initialized, got nil")
 	}
+	// Favourites default to a non-nil empty slice so the UI never nil-panics.
+	if s.Favorites == nil {
+		t.Error("Load() defaults: Favorites should be initialized (empty, not nil)")
+	}
+	if len(s.Favorites) != 0 {
+		t.Errorf("Load() defaults: Favorites = %v, want empty", s.Favorites)
+	}
+}
+
+// TestFavoritesRoundTrip pins that a non-empty, ORDERED favourites list survives
+// a Save/Load cycle unchanged. Order matters: the UI pins favourites in this
+// sequence, so a reordering bug would silently reshuffle the user's section.
+func TestFavoritesRoundTrip(t *testing.T) {
+	pointConfigDir(t)
+
+	want := &Settings{
+		Hotkeys:   map[string]string{},
+		Favorites: []string{"memes/airhorn", "effects/laser", "games/level-up"},
+	}
+	if err := want.Save(); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !reflect.DeepEqual(want.Favorites, got.Favorites) {
+		t.Errorf("favourites round-trip mismatch:\n want %v\n got  %v", want.Favorites, got.Favorites)
+	}
 }
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -77,7 +107,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 				"memes/airhorn": 1.25,
 			},
 		},
-		Window: WindowPrefs{Width: 800, Height: 600},
+		// Favourites are an ordered list of clip IDs; order must round-trip.
+		Favorites: []string{"memes/airhorn", "games/level-up"},
+		Window:    WindowPrefs{Width: 800, Height: 600},
 	}
 
 	if err := want.Save(); err != nil {
