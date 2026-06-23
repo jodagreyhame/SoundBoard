@@ -32,6 +32,7 @@ import (
 	"soundboard/internal/audio"
 	"soundboard/internal/catalog"
 	"soundboard/internal/config"
+	"soundboard/internal/denoise"
 	"soundboard/internal/devices"
 	"soundboard/internal/hotkeys"
 	"soundboard/internal/setup"
@@ -128,6 +129,15 @@ func main() {
 	// Seed the engine gains from saved volumes (default to unity).
 	applyVolumes(engine, settings)
 
+	// Seed the mic-processing suite from saved settings so the gate mode,
+	// sensitivity, and feature toggles are live from the first buffer. Log an
+	// honest line when noise suppression was requested but RNNoise is unavailable
+	// in this build (it degrades to passthrough rather than failing).
+	applyProcessing(engine, settings)
+	if settings.Processing.NoiseSuppression && !denoise.Available() {
+		log.Printf("noise suppression enabled in settings but RNNoise is unavailable in this build (built without cgo); it will be a no-op")
+	}
+
 	// Without the VB-CABLE playback endpoint there is nowhere to route the mix.
 	// Run in degraded mode: keep the window alive so the user can install
 	// VB-CABLE and relaunch, but do not start the duplex engine.
@@ -176,6 +186,21 @@ func main() {
 			log.Printf("hotkey %q: %v", combo, err)
 		}
 	}
+	// Push-to-talk: when a PTT hotkey is configured, register it with real key
+	// down/up so holding it opens the mic gate (in "ptt" MicMode) and releasing it
+	// closes it. The engine ignores PTT state in the other gate modes, so a stray
+	// binding is harmless. A parse/registration error is logged, not fatal.
+	if combo := settings.Processing.PTTHotkey; combo != "" {
+		if err := hk.RegisterPTT(combo,
+			func() { engine.SetPTTDown(true) },
+			func() { engine.SetPTTDown(false) },
+		); err != nil {
+			log.Printf("PTT hotkey %q: %v", combo, err)
+		} else {
+			log.Printf("push-to-talk bound to %q (used in \"ptt\" mic mode)", combo)
+		}
+	}
+
 	hk.Run()
 	defer hk.Close()
 
@@ -193,7 +218,8 @@ func main() {
 	vol := &volController{engine: engine, settings: settings}
 	app := ui.New(lib, engine, vol, setupCtl).
 		WithWindowStore(&winController{settings: settings}).
-		WithFavorites(&favController{settings: settings})
+		WithFavorites(&favController{settings: settings}).
+		WithAudio(&audioController{engine: engine, settings: settings})
 	app.Run()
 }
 
@@ -204,6 +230,19 @@ func applyVolumes(engine *audio.Engine, s *config.Settings) {
 	engine.SetMicGain(orUnity(s.Volumes.Mic))
 	engine.SetMasterGain(orUnity(s.Volumes.Master))
 	engine.SetMonitorGain(orUnity(s.Volumes.Monitor))
+}
+
+// applyProcessing seeds the engine's mic-processing suite from saved settings so
+// the gate mode, sensitivity, and feature toggles take effect from the first
+// buffer. settings.Processing was normalized on load, so MicMode and
+// GateSensitivity are already valid here.
+func applyProcessing(engine *audio.Engine, s *config.Settings) {
+	engine.SetMicMode(s.Processing.MicMode)
+	engine.SetGateSensitivity(s.Processing.GateSensitivity)
+	engine.SetNoiseSuppression(s.Processing.NoiseSuppression)
+	engine.SetAGC(s.Processing.AGC)
+	engine.SetDucking(s.Processing.Ducking)
+	engine.SetForceThrough(s.Processing.ForceThrough)
 }
 
 // clipGain returns the saved per-clip gain for id, defaulting to unity.
@@ -232,7 +271,69 @@ var (
 	_ ui.SetupController     = (*setupController)(nil)
 	_ ui.WindowStore         = (*winController)(nil)
 	_ ui.FavoritesController = (*favController)(nil)
+	_ ui.AudioController     = (*audioController)(nil)
 )
+
+// audioController adapts the engine + settings to ui.AudioController: each setter
+// pushes the new value into the engine immediately (atomic, RT-safe) AND records
+// it in settings.Processing so main's deferred settings.Save() persists it on
+// exit, matching how volumes/favourites/window size are saved. Getters seed the
+// Audio panel from the saved settings. It satisfies ui.AudioController.
+//
+// SetPTTHotkey persists the combo but does NOT live-rebind the global hotkey
+// here; PTT registration happens at startup from the saved setting. A changed PTT
+// combo takes effect on the next launch, which is documented to the user. (Live
+// re-registration would require threading the hotkey Manager through here; it is
+// deferred to keep this foundation adapter thin.)
+type audioController struct {
+	engine   *audio.Engine
+	settings *config.Settings
+}
+
+func (a *audioController) NoiseSuppression() bool { return a.settings.Processing.NoiseSuppression }
+func (a *audioController) SetNoiseSuppression(on bool) {
+	a.engine.SetNoiseSuppression(on)
+	a.settings.Processing.NoiseSuppression = on
+}
+
+func (a *audioController) AGC() bool { return a.settings.Processing.AGC }
+func (a *audioController) SetAGC(on bool) {
+	a.engine.SetAGC(on)
+	a.settings.Processing.AGC = on
+}
+
+func (a *audioController) Ducking() bool { return a.settings.Processing.Ducking }
+func (a *audioController) SetDucking(on bool) {
+	a.engine.SetDucking(on)
+	a.settings.Processing.Ducking = on
+}
+
+func (a *audioController) MicMode() string { return a.settings.Processing.MicMode }
+func (a *audioController) SetMicMode(mode string) {
+	a.engine.SetMicMode(mode)
+	a.settings.Processing.MicMode = mode
+}
+
+func (a *audioController) GateSensitivity() float32 { return a.settings.Processing.GateSensitivity }
+func (a *audioController) SetGateSensitivity(t float32) {
+	a.engine.SetGateSensitivity(t)
+	a.settings.Processing.GateSensitivity = t
+}
+
+func (a *audioController) ForceThrough() bool { return a.settings.Processing.ForceThrough }
+func (a *audioController) SetForceThrough(on bool) {
+	a.engine.SetForceThrough(on)
+	a.settings.Processing.ForceThrough = on
+}
+
+func (a *audioController) PTTHotkey() string { return a.settings.Processing.PTTHotkey }
+func (a *audioController) SetPTTHotkey(combo string) {
+	// Persist only; the global PTT binding is registered at startup. A changed
+	// combo takes effect on the next launch.
+	a.settings.Processing.PTTHotkey = combo
+}
+
+func (a *audioController) GateLevel() float32 { return a.engine.GateLevel() }
 
 // favController adapts config.Settings.Favorites to ui.FavoritesController. A
 // toggle mutates the in-memory Favorites slice (added at the end when newly

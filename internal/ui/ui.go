@@ -82,6 +82,47 @@ type VolumeController interface {
 	Clip(id string) float32
 }
 
+// AudioController is the UI's view of the mic-path processing suite for the
+// "Audio" settings panel. It mirrors config.AudioProcessing: a getter and setter
+// for each independent control, plus GateLevel for a live mic-open meter. main
+// wires it to the engine + settings so a setter pushes the change into the engine
+// immediately AND persists it; getters seed the panel's controls at startup.
+//
+// The UI never imports internal/audio (or any cgo): it only talks to this small
+// interface, exactly like Player/VolumeController/SetupController, keeping the
+// Fyne layer free of audio/COM/cgo concerns and testable with a fake.
+//
+// Every control applies ONLY to the live mic before it is mixed into the cable;
+// soundboard clips bypass all of it. MicMode is one of "vad", "ptt", "always",
+// "mute" (the panel offers these as a choice); GateSensitivity is in [0,1].
+type AudioController interface {
+	// NoiseSuppression / SetNoiseSuppression toggle RNNoise on the mic. A no-op
+	// effect when the build lacks RNNoise, so the panel can always offer it.
+	NoiseSuppression() bool
+	SetNoiseSuppression(on bool)
+	// AGC / SetAGC toggle the RMS-target leveler on the mic.
+	AGC() bool
+	SetAGC(on bool)
+	// Ducking / SetDucking toggle lowering clips while the mic gate is open.
+	Ducking() bool
+	SetDucking(on bool)
+	// MicMode / SetMicMode read/select the gate mode ("vad"|"ptt"|"always"|"mute").
+	MicMode() string
+	SetMicMode(mode string)
+	// GateSensitivity / SetGateSensitivity read/set the gate threshold in [0,1].
+	GateSensitivity() float32
+	SetGateSensitivity(t float32)
+	// ForceThrough / SetForceThrough toggle the voiced carrier on the cable path.
+	ForceThrough() bool
+	SetForceThrough(on bool)
+	// PTTHotkey / SetPTTHotkey read/set the push-to-talk combo (empty = none).
+	PTTHotkey() string
+	SetPTTHotkey(combo string)
+	// GateLevel returns the current mic-gate open level in [0,1] for a live meter
+	// (0 = closed, 1 = open). Polled by the UI; cheap to call.
+	GateLevel() float32
+}
+
 // SetupController exposes the VB-CABLE / auto-route state to the banner.
 type SetupController interface {
 	// Status reports whether routing is ready (cable present AND engaged — i.e.
@@ -124,6 +165,11 @@ type App struct {
 	// favs is the favourites view-model: star toggles and the pinned Favourites
 	// section read it. Optional; nil = no favourites UI (stars/section hidden).
 	favs FavoritesController
+
+	// audio is the mic-processing view-model for the "Audio" settings panel.
+	// Optional; nil = the panel is omitted (the rest of the UI is unaffected).
+	// Wired via WithAudio so existing call sites that do not pass it keep working.
+	audio AudioController
 
 	fyneApp fyne.App
 	win     fyne.Window
@@ -170,6 +216,21 @@ func (a *App) WithWindowStore(w WindowStore) *App {
 // Call before Run/build.
 func (a *App) WithFavorites(f FavoritesController) *App {
 	a.favs = f
+	return a
+}
+
+// WithAudio attaches an optional AudioController so the window gains an "Audio"
+// settings panel for the mic-processing suite (noise suppression, AGC, gate mode
+// + sensitivity, ducking, force-through carrier, PTT hotkey) and a live mic-open
+// meter. When nil the panel is omitted entirely and the rest of the UI is
+// unchanged. Returns the App for chaining. Call before Run/build.
+//
+// This is a foundation stub: it stores the controller so main can wire the engine
+// + settings against a stable signature now. The panel widgets themselves are
+// built in a later phase; storing the controller here does not yet add any Fyne
+// objects, so existing UI tests are unaffected.
+func (a *App) WithAudio(c AudioController) *App {
+	a.audio = c
 	return a
 }
 

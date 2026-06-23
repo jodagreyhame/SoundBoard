@@ -26,6 +26,21 @@ type Manager struct {
 	bindings []*binding
 	done     chan struct{}
 	closed   bool
+
+	// ptt is the optional push-to-talk binding registered via RegisterPTT. It is
+	// driven by its OWN dedicated goroutine (pttLoop) reading both Keydown and
+	// Keyup, so a HELD key produces a down->up pair without disturbing the
+	// clip-trigger pump (which only cares about Keydown). nil when no PTT is set.
+	ptt *pttBinding
+}
+
+// pttBinding holds the push-to-talk hotkey and its down/up callbacks. Unlike the
+// trigger bindings, the PTT key needs key-UP too (to close the mic gate when the
+// user releases it), so it has its own long-lived reader goroutine.
+type pttBinding struct {
+	hk     *hotkey.Hotkey
+	onDown func()
+	onUp   func()
 }
 
 // New creates an empty hotkey manager.
@@ -56,6 +71,106 @@ func (m *Manager) Register(combo string, clipID string) error {
 	m.bindings = append(m.bindings, &binding{hk: hk, clipID: clipID})
 	m.mu.Unlock()
 	return nil
+}
+
+// RegisterPTT registers a push-to-talk hotkey from a combo like "ctrl+grave" and
+// arranges for onDown to be called when the key is pressed and onUp when it is
+// released. It uses REAL key up/down: golang.design/x/hotkey exposes a Keyup
+// channel, and on Windows it is synthesized by polling GetAsyncKeyState while the
+// hotkey is held, so a held key reliably yields a down THEN an up. The PTT binding
+// runs on its OWN goroutine, independent of the clip-trigger pump, so holding the
+// key does not interfere with (or get torn down by) clip hotkeys.
+//
+// At most one PTT binding exists; calling RegisterPTT again replaces the previous
+// one (the old hotkey is unregistered). An empty combo unregisters any PTT binding
+// and returns nil. Registration errors (e.g. the combo is already owned) are
+// returned and leave any prior PTT binding in place.
+//
+// NOTE on approximation: the Windows backend derives key-up from AsyncKeyState
+// polling at 100Hz, so an extremely brief tap may coalesce; for push-to-talk
+// (held while speaking) this is not a concern. This is real up/down, not a
+// hold-with-timeout hack.
+func (m *Manager) RegisterPTT(combo string, onDown, onUp func()) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return fmt.Errorf("hotkeys: manager closed")
+	}
+	m.mu.Unlock()
+
+	// Empty combo => clear any existing PTT binding.
+	if strings.TrimSpace(combo) == "" {
+		m.clearPTT()
+		return nil
+	}
+
+	mods, key, err := parseCombo(combo)
+	if err != nil {
+		return fmt.Errorf("hotkeys: parse PTT %q: %w", combo, err)
+	}
+	hk := hotkey.New(mods, key)
+	if err := hk.Register(); err != nil {
+		return fmt.Errorf("hotkeys: register PTT %q: %w", combo, err)
+	}
+
+	// Swap in the new binding, unregistering and stopping the old one first.
+	m.clearPTT()
+	pb := &pttBinding{hk: hk, onDown: onDown, onUp: onUp}
+	m.mu.Lock()
+	m.ptt = pb
+	done := m.done
+	m.mu.Unlock()
+
+	go m.pttLoop(pb, done)
+	return nil
+}
+
+// pttLoop drives one PTT binding: it blocks on Keydown (fires onDown) then on the
+// matching Keyup (fires onUp), looping until the hotkey is unregistered (its
+// channels close) or the manager is closed. It never holds m.mu while invoking a
+// callback, so a callback may safely call back into the engine.
+func (m *Manager) pttLoop(pb *pttBinding, done <-chan struct{}) {
+	for {
+		select {
+		case _, ok := <-pb.hk.Keydown():
+			if !ok {
+				return // hotkey unregistered
+			}
+			if pb.onDown != nil {
+				pb.onDown()
+			}
+			// Wait for the release (or shutdown) before accepting the next press,
+			// so onDown/onUp always pair up and the gate cannot get stuck open.
+			select {
+			case _, ok := <-pb.hk.Keyup():
+				if !ok {
+					return
+				}
+				if pb.onUp != nil {
+					pb.onUp()
+				}
+			case <-done:
+				if pb.onUp != nil {
+					pb.onUp() // ensure the mic is not left open on shutdown
+				}
+				return
+			}
+		case <-done:
+			return
+		}
+	}
+}
+
+// clearPTT unregisters and forgets any current PTT binding. The pttLoop goroutine
+// observes the hotkey's channels closing (Unregister) and returns on its own.
+func (m *Manager) clearPTT() {
+	m.mu.Lock()
+	pb := m.ptt
+	m.ptt = nil
+	m.mu.Unlock()
+	if pb != nil {
+		_ = pb.hk.Unregister()
+	}
 }
 
 // Run starts the event pump. It runs the register + event pump on a single
@@ -142,10 +257,16 @@ func (m *Manager) Close() {
 	close(m.done)
 	bindings := m.bindings
 	m.bindings = nil
+	ptt := m.ptt
+	m.ptt = nil
 	m.mu.Unlock()
 
 	for _, b := range bindings {
 		_ = b.hk.Unregister()
+	}
+	// Unregister the PTT hotkey too; its pttLoop goroutine returns on close(done).
+	if ptt != nil {
+		_ = ptt.hk.Unregister()
 	}
 }
 

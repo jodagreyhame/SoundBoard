@@ -171,6 +171,27 @@ type Engine struct {
 	masterGainBits  atomic.Uint32
 	monitorGainBits atomic.Uint32
 
+	// --- Mic-path processing-suite controls (see processing.go) ---
+	//
+	// All are atomic so any goroutine (UI, hotkeys) may set them and the RT
+	// callback / DSP worker reads each once per buffer or frame via a single
+	// atomic load — no lock, no allocation. They configure ONLY the live-mic
+	// chain (gain -> mono -> HPF -> denoise -> AGC -> gate -> stereo); triggered
+	// soundboard clips are mixed in AFTER the chain and are never affected.
+	//
+	// These fields are declared here but, in this foundation phase, are not yet
+	// read by duplexCallback's DSP — the heavy worker + ring buffers land in
+	// phase 2. The setters and GateLevel are live now so config, UI, and hotkeys
+	// can be wired against stable signatures.
+	micModeBits     atomic.Int32  // gate mode enum (see micMode* consts)
+	gateSensBits    atomic.Uint32 // gate threshold float32 bits, [0,1]
+	pttDown         atomic.Bool   // true while the PTT hotkey is held
+	noiseSuppressOn atomic.Bool   // run RNNoise on the mic when true
+	agcOn           atomic.Bool   // run the RMS-target leveler when true
+	duckingOn       atomic.Bool   // duck clips under an open mic gate when true
+	forceThroughOn  atomic.Bool   // emit the voiced carrier on the cable when true
+	gateLevelBits   atomic.Uint32 // published gate-open level float32 bits, [0,1]
+
 	// pending / monPending hand clips from Trigger to the RT callbacks. Each
 	// callback drains its own channel; the slices below are touched only by
 	// their owning callback.
@@ -196,6 +217,11 @@ func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 	e.micGainBits.Store(float32bits(1))
 	e.masterGainBits.Store(float32bits(1))
 	e.monitorGainBits.Store(float32bits(1))
+	// Mic-processing defaults mirror config.AudioProcessing's normalize: gate by
+	// voice activity at the default sensitivity, every optional feature off. main
+	// overrides these from saved settings at startup via the Set* methods.
+	e.micModeBits.Store(micModeVAD)
+	e.gateSensBits.Store(float32bits(defaultGateSensitivity))
 	return e
 }
 

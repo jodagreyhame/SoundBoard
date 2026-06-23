@@ -60,6 +60,55 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if len(s.Favorites) != 0 {
 		t.Errorf("Load() defaults: Favorites = %v, want empty", s.Favorites)
 	}
+	// Mic-processing defaults: gate by voice activity at the default sensitivity,
+	// every optional feature off. This is the "clean voice, no carrier" baseline.
+	if s.Processing.MicMode != MicModeVAD {
+		t.Errorf("Load() defaults: Processing.MicMode = %q, want %q", s.Processing.MicMode, MicModeVAD)
+	}
+	if s.Processing.GateSensitivity != defaultGateSensitivity {
+		t.Errorf("Load() defaults: Processing.GateSensitivity = %v, want %v", s.Processing.GateSensitivity, defaultGateSensitivity)
+	}
+	if s.Processing.NoiseSuppression || s.Processing.AGC || s.Processing.Ducking || s.Processing.ForceThrough {
+		t.Errorf("Load() defaults: all processing toggles should be off, got %+v", s.Processing)
+	}
+	if s.Processing.PTTHotkey != "" {
+		t.Errorf("Load() defaults: Processing.PTTHotkey = %q, want empty", s.Processing.PTTHotkey)
+	}
+}
+
+// TestLoadNormalizesProcessing pins that an upgraded config with a partial or
+// invalid processing block loads back with a valid MicMode and a clamped, sane
+// gate sensitivity, while preserving the toggles the user explicitly set.
+func TestLoadNormalizesProcessing(t *testing.T) {
+	pointConfigDir(t)
+
+	// An invalid MicMode and an out-of-range sensitivity must be coerced; the AGC
+	// toggle the user set must survive.
+	stored := &Settings{
+		Hotkeys: map[string]string{},
+		Processing: AudioProcessing{
+			MicMode:         "bogus",
+			GateSensitivity: 9.0, // out of range, must clamp to 1
+			AGC:             true,
+		},
+	}
+	if err := stored.Save(); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got.Processing.MicMode != MicModeVAD {
+		t.Errorf("MicMode = %q, want %q (invalid coerced)", got.Processing.MicMode, MicModeVAD)
+	}
+	if got.Processing.GateSensitivity != 1 {
+		t.Errorf("GateSensitivity = %v, want 1 (clamped)", got.Processing.GateSensitivity)
+	}
+	if !got.Processing.AGC {
+		t.Error("AGC = false, want true (preserved)")
+	}
 }
 
 // TestFavoritesRoundTrip pins that a non-empty, ORDERED favourites list survives
@@ -110,6 +159,17 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		// Favourites are an ordered list of clip IDs; order must round-trip.
 		Favorites: []string{"memes/airhorn", "games/level-up"},
 		Window:    WindowPrefs{Width: 800, Height: 600},
+		// The mic-processing block must round-trip every field, including the
+		// non-default MicMode and a custom gate sensitivity.
+		Processing: AudioProcessing{
+			NoiseSuppression: true,
+			AGC:              true,
+			Ducking:          true,
+			MicMode:          MicModePTT,
+			GateSensitivity:  0.42,
+			ForceThrough:     true,
+			PTTHotkey:        "ctrl+grave",
+		},
 	}
 
 	if err := want.Save(); err != nil {

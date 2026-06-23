@@ -40,6 +40,78 @@ type Settings struct {
 	// Window holds the Fyne main-window placement/size preferences so the app
 	// reopens where the user left it. Omitted when empty.
 	Window WindowPrefs `json:"window,omitempty"`
+
+	// Processing holds the mic-path audio-processing suite settings (noise
+	// suppression, AGC, gate/VAD mode, ducking, and the "force through" carrier).
+	// These apply ONLY to the live mic before it is mixed into the cable;
+	// soundboard clips bypass all of it. Omitted when empty so an upgraded config
+	// without a processing block round-trips to its prior shape; normalize() fills
+	// in sane defaults (e.g. MicMode "vad") on load.
+	Processing AudioProcessing `json:"processing,omitempty"`
+}
+
+// MicMode names the four mic-gate behaviors. Stored as a lowercase string in the
+// config so it is human-editable and forward-compatible. normalize() coerces an
+// empty or unrecognized value back to MicModeVAD.
+const (
+	// MicModeVAD opens the gate by voice activity (RMS/VAD), the default.
+	MicModeVAD = "vad"
+	// MicModePTT opens the mic only while the configured PTTHotkey is held.
+	MicModePTT = "ptt"
+	// MicModeAlways keeps the gate open (no gating; processing still applies).
+	MicModeAlways = "always"
+	// MicModeMute keeps the gate closed (mic silenced to Discord).
+	MicModeMute = "mute"
+)
+
+// AudioProcessing is the persisted configuration of the mic-path processing
+// suite. Every field is independent and applies ONLY to the live microphone
+// (input gain -> mono -> HPF -> denoise -> AGC -> gate -> stereo) before it is
+// mixed into the cable; triggered soundboard clips are summed in AFTER this chain
+// and are never denoised, gated, or leveled.
+//
+// Defaults (filled by normalize when unset): NoiseSuppression off, AGC off,
+// Ducking off, MicMode "vad", GateSensitivity ~0.15, ForceThrough off, no PTT
+// hotkey. With everything at its default the suite gates the mic by voice
+// activity and otherwise passes clean voice through, so the user can run Discord
+// with all of Discord's own processing OFF.
+type AudioProcessing struct {
+	// NoiseSuppression runs RNNoise on the mic frames when true. A no-op when the
+	// build lacks cgo/RNNoise (the engine falls back to passthrough), so enabling
+	// it is always safe.
+	NoiseSuppression bool `json:"noiseSuppression,omitempty"`
+	// AGC enables the RMS-target automatic gain leveler on the mic.
+	AGC bool `json:"agc,omitempty"`
+	// Ducking lowers soundboard clips slightly while the mic gate is open (and
+	// vice-versa) via an envelope follower.
+	Ducking bool `json:"ducking,omitempty"`
+	// MicMode selects the gate behavior: one of "vad", "ptt", "always", "mute".
+	// normalize() defaults an empty/invalid value to "vad".
+	MicMode string `json:"micMode,omitempty"`
+	// GateSensitivity is the VAD/RMS gate threshold in [0,1]; higher = the gate
+	// requires a louder voice to open. normalize() defaults 0 to ~0.15 and clamps
+	// to [0,1].
+	GateSensitivity float32 `json:"gateSensitivity,omitempty"`
+	// ForceThrough enables the continuous voiced "carrier" bed added to the CABLE
+	// path only, to keep Discord's voice-activity gate latched open. Default off.
+	ForceThrough bool `json:"forceThrough,omitempty"`
+	// PTTHotkey is the combo (e.g. "ctrl+grave") that opens the mic in "ptt" mode.
+	// Empty means no PTT binding is registered. Parsed by internal/hotkeys.
+	PTTHotkey string `json:"pttHotkey,omitempty"`
+}
+
+// defaultGateSensitivity is the gate threshold used when none is configured. Low
+// enough that a normal speaking voice opens the gate, high enough to reject idle
+// room/keyboard noise. Mirrors the contract default (~0.15).
+const defaultGateSensitivity float32 = 0.15
+
+// validMicMode reports whether m is one of the four recognized gate modes.
+func validMicMode(m string) bool {
+	switch m {
+	case MicModeVAD, MicModePTT, MicModeAlways, MicModeMute:
+		return true
+	}
+	return false
 }
 
 // Volumes are the soundboard mixer levels, all linear amplitudes where 1.0
@@ -90,6 +162,27 @@ func (s *Settings) normalize() {
 	}
 	if s.Favorites == nil {
 		s.Favorites = []string{}
+	}
+	s.Processing.normalize()
+}
+
+// normalize fills in the mic-processing defaults so a fresh or upgraded config
+// has a usable gate mode and a sane gate sensitivity. An empty or unrecognized
+// MicMode becomes "vad"; a zero GateSensitivity becomes the default, and any
+// value is clamped to [0,1] so the engine never sees an out-of-range threshold.
+// The bool toggles default to false (off), matching the contract.
+func (p *AudioProcessing) normalize() {
+	if !validMicMode(p.MicMode) {
+		p.MicMode = MicModeVAD
+	}
+	if p.GateSensitivity == 0 {
+		p.GateSensitivity = defaultGateSensitivity
+	}
+	if p.GateSensitivity < 0 {
+		p.GateSensitivity = 0
+	}
+	if p.GateSensitivity > 1 {
+		p.GateSensitivity = 1
 	}
 }
 
