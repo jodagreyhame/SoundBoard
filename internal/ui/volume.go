@@ -11,32 +11,56 @@ import (
 	"soundboard/internal/catalog"
 )
 
-// buildVolumeArea builds the mic / soundboard-master / per-clip volume panel
-// shown at the bottom of the window. The per-clip slider acts on whichever clip
-// was last clicked (selectClip), so a user plays a sound then nudges its level.
+// Slider labels make it unmistakable WHO hears each level. They are exported as
+// constants so the redesign's wording is asserted by a test (a label drift then
+// fails the build rather than silently confusing the user).
+const (
+	micLabel     = "Microphone — your voice"
+	masterLabel  = "Soundboard — what others hear in Discord"
+	monitorLabel = "Soundboard — what you hear"
+	clipLabel    = "This clip"
+
+	// volumeCaption spells out the local/Discord split so the panel is
+	// self-explanatory at a glance.
+	volumeCaption = "Your mic and \"what you hear\" stay local to you. " +
+		"\"What others hear\" is the only level Discord transmits."
+)
+
+// buildVolumeArea builds the self-explanatory volume panel shown at the bottom
+// of the window. It groups three INDEPENDENT levels — the mic (your voice to
+// Discord), the soundboard level OTHERS hear in Discord, and the soundboard
+// level YOU hear locally — plus a per-clip control. Each is labelled with who
+// hears it, and a caption clarifies the local-vs-Discord split. The per-clip
+// slider acts on whichever clip was last clicked (selectClip), so a user plays a
+// sound then nudges its level.
 func (a *App) buildVolumeArea() fyne.CanvasObject {
 	mic := newGainSlider()
 	master := newGainSlider()
+	monitor := newGainSlider()
 	perClip := newGainSlider()
 	perClip.Disable() // enabled once a clip is selected
 
 	micPct := widget.NewLabel("")
 	masterPct := widget.NewLabel("")
+	monitorPct := widget.NewLabel("")
 	clipPct := widget.NewLabel("")
 	clipName := widget.NewLabel("No clip selected")
 	clipName.TextStyle = fyne.TextStyle{Italic: true}
 
-	// Seed slider positions from the controller (defaulting to unity).
+	// Seed slider positions from the controller getters (defaulting to unity).
 	if a.vol != nil {
 		mic.SetValue(clampGain(float64(a.vol.Mic())))
 		master.SetValue(clampGain(float64(a.vol.Master())))
+		monitor.SetValue(clampGain(float64(a.vol.Monitor())))
 	} else {
 		mic.SetValue(1)
 		master.SetValue(1)
+		monitor.SetValue(1)
 	}
 	perClip.SetValue(1)
 	micPct.SetText(pct(mic.Value))
 	masterPct.SetText(pct(master.Value))
+	monitorPct.SetText(pct(monitor.Value))
 	clipPct.SetText(pct(perClip.Value))
 
 	mic.OnChanged = func(v float64) {
@@ -49,6 +73,12 @@ func (a *App) buildVolumeArea() fyne.CanvasObject {
 		masterPct.SetText(pct(v))
 		if a.vol != nil {
 			a.vol.SetMaster(float32(v))
+		}
+	}
+	monitor.OnChanged = func(v float64) {
+		monitorPct.SetText(pct(v))
+		if a.vol != nil {
+			a.vol.SetMonitor(float32(v))
 		}
 	}
 	perClip.OnChanged = func(v float64) {
@@ -76,17 +106,25 @@ func (a *App) buildVolumeArea() fyne.CanvasObject {
 		perClip.Enable()
 	}
 
-	grid := container.NewGridWithColumns(1,
-		gainRow(theme.VolumeUpIcon(), "Mic", mic, micPct),
-		gainRow(theme.MediaPlayIcon(), "Soundboard", master, masterPct),
+	caption := widget.NewLabelWithStyle(volumeCaption, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+	caption.Wrapping = fyne.TextWrapWord
+
+	grid := container.NewVBox(
+		caption,
+		gainRow(theme.VolumeUpIcon(), micLabel, mic, micPct),
+		gainRow(theme.MediaPlayIcon(), masterLabel, master, masterPct),
+		gainRow(theme.VolumeDownIcon(), monitorLabel, monitor, monitorPct),
+		widget.NewSeparator(),
 		clipName,
-		gainRow(theme.SettingsIcon(), "This clip", perClip, clipPct),
+		gainRow(theme.SettingsIcon(), clipLabel, perClip, clipPct),
 	)
 	card := widget.NewCard("Volume", "Levels apply instantly and are saved on exit.", grid)
 	return container.NewPadded(card)
 }
 
-// gainRow lays out an icon + fixed-width label + slider + percent readout.
+// gainRow lays out an icon + label + slider + percent readout. The label takes a
+// fixed leading width so the who-hears-what text is always fully visible and the
+// sliders line up.
 func gainRow(icon fyne.Resource, label string, slider *widget.Slider, readout *widget.Label) fyne.CanvasObject {
 	name := widget.NewLabelWithStyle(label, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	left := container.NewHBox(widget.NewIcon(icon), name)

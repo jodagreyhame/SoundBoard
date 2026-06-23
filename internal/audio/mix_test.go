@@ -24,7 +24,7 @@ func approx(a, b float32) bool { return math.Abs(float64(a-b)) <= fEps }
 func TestMicPassthroughNoCursors(t *testing.T) {
 	out := make([]float32, 8)
 	mic := []float32{0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4}
-	got := mixInto(out, mic, nil)
+	got := mixInto(out, mic, nil, 1)
 	if len(got) != 0 {
 		t.Fatalf("expected no surviving cursors, got %d", len(got))
 	}
@@ -49,7 +49,7 @@ func TestClamp(t *testing.T) {
 		pcm[f*channels+1] = -0.9
 	}
 	c := &clipCursor{pcm: pcm, pos: fadeFrames * channels} // past fade-in -> gain 1.0
-	cursors := mixInto(out, mic, []*clipCursor{c})
+	cursors := mixInto(out, mic, []*clipCursor{c}, 1)
 	if len(cursors) != 1 {
 		t.Fatalf("clip should still be active, got %d cursors", len(cursors))
 	}
@@ -70,7 +70,7 @@ func TestOverlapSummation(t *testing.T) {
 		c.pos = fadeFrames * channels
 		return c
 	}
-	cursors := mixInto(out, nil, []*clipCursor{mk(), mk()})
+	cursors := mixInto(out, nil, []*clipCursor{mk(), mk()}, 1)
 	if len(cursors) != 2 {
 		t.Fatalf("both cursors should survive, got %d", len(cursors))
 	}
@@ -86,7 +86,7 @@ func TestCursorRetirement(t *testing.T) {
 	// Clip of 2 frames; buffer of 4 frames -> consumed and retired.
 	c := &clipCursor{pcm: flat(0.5, 2)}
 	out := make([]float32, 4*channels)
-	cursors := mixInto(out, nil, []*clipCursor{c})
+	cursors := mixInto(out, nil, []*clipCursor{c}, 1)
 	if len(cursors) != 0 {
 		t.Fatalf("short cursor should be retired, got %d", len(cursors))
 	}

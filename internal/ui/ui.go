@@ -41,14 +41,26 @@ type Player interface {
 
 // VolumeController is the UI's view of the mixer. Setters push a new level into
 // the engine immediately; getters seed the sliders at startup. All levels are
-// linear amplitudes (1.0 = unchanged).
+// linear amplitudes (1.0 = unchanged). The three top-level levels are
+// INDEPENDENT and each has a clear "who hears it" meaning:
+//   - Mic     : how loud the user's real voice is to Discord.
+//   - Master  : the soundboard level OTHERS hear in Discord (clips -> cable).
+//   - Monitor : the soundboard level the USER hears locally (clips -> headset).
+//
+// SetClip / Clip are the per-clip multiplier applied on top of both Master and
+// Monitor for the currently-selected clip.
 type VolumeController interface {
 	SetMic(gain float32)
 	SetMaster(gain float32)
+	// SetMonitor sets the local monitor level — the soundboard volume the USER
+	// hears in their own headset, independent of what Discord hears (SetMaster).
+	SetMonitor(gain float32)
 	SetClip(id string, gain float32)
 
 	Mic() float32
 	Master() float32
+	// Monitor returns the local "what you hear" soundboard level.
+	Monitor() float32
 	Clip(id string) float32
 }
 

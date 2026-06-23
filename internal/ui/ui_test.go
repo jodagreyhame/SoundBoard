@@ -29,19 +29,21 @@ func (f *fakePlayer) TriggerGain(id string, gain float32) {
 
 // fakeVol is an in-memory VolumeController.
 type fakeVol struct {
-	mic, master float32
-	clip        map[string]float32
+	mic, master, monitor float32
+	clip                 map[string]float32
 }
 
 func newFakeVol() *fakeVol {
-	return &fakeVol{mic: 1, master: 1, clip: map[string]float32{}}
+	return &fakeVol{mic: 1, master: 1, monitor: 1, clip: map[string]float32{}}
 }
 
 func (v *fakeVol) SetMic(g float32)             { v.mic = g }
 func (v *fakeVol) SetMaster(g float32)          { v.master = g }
+func (v *fakeVol) SetMonitor(g float32)         { v.monitor = g }
 func (v *fakeVol) SetClip(id string, g float32) { v.clip[id] = g }
 func (v *fakeVol) Mic() float32                 { return v.mic }
 func (v *fakeVol) Master() float32              { return v.master }
+func (v *fakeVol) Monitor() float32             { return v.monitor }
 func (v *fakeVol) Clip(id string) float32 {
 	if g, ok := v.clip[id]; ok {
 		return g

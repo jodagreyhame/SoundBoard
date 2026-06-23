@@ -50,16 +50,16 @@ const (
 	// rather than block a non-RT goroutine.
 	pendingCap = 256
 
-	// maxGain is the upper clamp for the mic, master, and per-clip gains. A
-	// little headroom above unity (1.5 ~= +3.5 dB) lets the user boost a quiet
-	// mic or clip without permitting extreme values that would just slam every
-	// sample into the [-1,1] clamp and clip badly.
+	// maxGain is the upper clamp for the mic, master, monitor, and per-clip
+	// gains. A little headroom above unity (1.5 ~= +3.5 dB) lets the user boost a
+	// quiet mic or clip without permitting extreme values that would just slam
+	// every sample into the [-1,1] clamp and clip badly.
 	maxGain = 1.5
 )
 
 // clampGain constrains a linear gain to [0, maxGain]. Shared by every gain
-// setter (mic, master, per-clip) so the RT callback never sees a NaN or an
-// out-of-range value.
+// setter (mic, master, monitor, per-clip) so the RT callback never sees a NaN
+// or an out-of-range value.
 func clampGain(g float32) float32 {
 	if g != g { // NaN
 		return 0
@@ -78,11 +78,13 @@ func clampGain(g float32) float32 {
 // interleaved pcm (advances by `channels` per frame).
 //
 // gain is the linear amplitude applied to this cursor's samples on top of the
-// fade ramp. It is captured at Trigger time (per-clip volume * master volume)
-// so each overlapping instance can be scaled independently. The ZERO value is
-// treated as unity (1.0) by gainOf so cursors constructed without an explicit
-// gain — including those in the existing mix tests — play at full level; a
-// genuinely silent clip is never triggered.
+// fade ramp. It is captured at Trigger time as the PER-CLIP volume only — the
+// soundboard "what others hear" (master) and "what you hear" (monitor) levels
+// are NOT baked in here; they are applied per buffer in mixInto so the duplex
+// and monitor paths can scale the SAME triggered clip independently. The ZERO
+// value is treated as unity (1.0) by gainOf so cursors constructed without an
+// explicit gain — including those in the existing mix tests — play at full
+// level; a genuinely silent (per-clip zero) clip is never triggered.
 type clipCursor struct {
 	pcm  []float32
 	pos  int
@@ -102,9 +104,11 @@ func gainOf(c *clipCursor) float32 {
 }
 
 // pendingClip is the unit handed from Trigger to an RT callback: the decoded
-// clip plus the per-instance gain (per-clip volume * master) captured at trigger
-// time. Carrying the gain on the handoff keeps the RT callback from reading any
-// shared per-clip volume map.
+// clip plus the per-instance PER-CLIP gain captured at trigger time. Carrying
+// the gain on the handoff keeps the RT callback from reading any shared per-clip
+// volume map. The master ("others hear") and monitor ("you hear") levels are
+// applied per buffer in mixInto, not folded in here, so the two paths stay
+// independent.
 type pendingClip struct {
 	clip *catalog.Clip
 	gain float32
@@ -143,12 +147,19 @@ type Engine struct {
 	// contends with the lifecycle lock.
 	monitorActive atomic.Bool
 
-	// micGainBits / masterGainBits hold the live mic-passthrough gain and the
-	// soundboard master gain as float32 bit patterns. They are written by the
-	// UI thread (SetMicGain / SetMasterGain) and read lock-free by the RT
-	// callback, so volume changes take effect without touching ctrlMu.
-	micGainBits    atomic.Uint32
-	masterGainBits atomic.Uint32
+	// micGainBits / masterGainBits / monitorGainBits hold three INDEPENDENT
+	// levels as float32 bit patterns, written by the UI thread and read lock-free
+	// by the RT callbacks so volume changes take effect without touching ctrlMu:
+	//   - micGainBits     : live mic passthrough, applied in the DUPLEX callback.
+	//   - masterGainBits   : the soundboard "what OTHERS hear in Discord" level,
+	//                        applied to clips in the DUPLEX callback (-> cable).
+	//   - monitorGainBits : the soundboard "what YOU hear" level, applied to clips
+	//                        in the MONITOR callback (-> the user's headset).
+	// master and monitor scale the SAME triggered clips but on different paths, so
+	// they are applied per buffer in mixInto rather than baked in at trigger time.
+	micGainBits     atomic.Uint32
+	masterGainBits  atomic.Uint32
+	monitorGainBits atomic.Uint32
 
 	// pending / monPending hand clips from Trigger to the RT callbacks. Each
 	// callback drains its own channel; the slices below are touched only by
@@ -162,7 +173,9 @@ type Engine struct {
 }
 
 // NewEngine creates an engine bound to a context and the decoded library.
-// Mic and master gains both default to unity (1.0).
+// Mic, master, and monitor gains all default to unity (1.0) so a fresh engine
+// passes the mic through unchanged and plays clips at full level on both the
+// duplex (-> Discord) and monitor (-> the user's headset) paths.
 func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 	e := &Engine{
 		ctx:        ctx,
@@ -172,6 +185,7 @@ func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 	}
 	e.micGainBits.Store(float32bits(1))
 	e.masterGainBits.Store(float32bits(1))
+	e.monitorGainBits.Store(float32bits(1))
 	return e
 }
 
@@ -182,16 +196,28 @@ func (e *Engine) SetMicGain(g float32) {
 	e.micGainBits.Store(float32bits(clampGain(g)))
 }
 
-// SetMasterGain sets the soundboard master gain (linear, 1.0 = unchanged)
-// applied to every clip on top of its per-clip volume. The value is clamped to
-// [0, maxGain]. Safe to call from any goroutine.
+// SetMasterGain sets the soundboard "what OTHERS hear in Discord" gain (linear,
+// 1.0 = unchanged) applied to every clip on the DUPLEX path (-> cable ->
+// Discord) on top of its per-clip volume. The value is clamped to [0, maxGain].
+// Safe to call from any goroutine. Independent of the monitor gain, so muting
+// what Discord hears does not silence what the user hears locally.
 func (e *Engine) SetMasterGain(g float32) {
 	e.masterGainBits.Store(float32bits(clampGain(g)))
 }
 
-// micGain / masterGain read the current gains lock-free.
-func (e *Engine) micGain() float32    { return float32frombits(e.micGainBits.Load()) }
-func (e *Engine) masterGain() float32 { return float32frombits(e.masterGainBits.Load()) }
+// SetMonitorGain sets the soundboard "what YOU hear" gain (linear, 1.0 =
+// unchanged) applied to every clip on the MONITOR path (-> the user's headset)
+// on top of its per-clip volume. The value is clamped to [0, maxGain]. Safe to
+// call from any goroutine. Independent of the master gain, so the user can lower
+// their own local monitor without changing what Discord transmits.
+func (e *Engine) SetMonitorGain(g float32) {
+	e.monitorGainBits.Store(float32bits(clampGain(g)))
+}
+
+// micGain / masterGain / monitorGain read the current gains lock-free.
+func (e *Engine) micGain() float32     { return float32frombits(e.micGainBits.Load()) }
+func (e *Engine) masterGain() float32  { return float32frombits(e.masterGainBits.Load()) }
+func (e *Engine) monitorGain() float32 { return float32frombits(e.monitorGainBits.Load()) }
 
 // Configure sets up the malgo DUPLEX device: Capture=mic, Playback=cable,
 // FormatF32, 48k, 2ch, small period (128-256 frames). It does not start it.
@@ -372,17 +398,21 @@ func (e *Engine) Stop() error {
 	return nil
 }
 
-// Trigger plays the clip at unit per-clip gain (scaled only by the master gain).
-// It is shorthand for TriggerGain(id, 1). Implements the ui.Player default path.
+// Trigger plays the clip at unit per-clip gain (scaled by the master/monitor
+// gains per path). It is shorthand for TriggerGain(id, 1). Implements the
+// ui.Player default path.
 func (e *Engine) Trigger(id string) { e.TriggerGain(id, 1) }
 
 // TriggerGain looks up the clip by ID and hands it to the RT callbacks over the
-// pending channels with a per-instance gain of gain*master captured now, so
-// later master/per-clip changes do not retroactively alter sounds already in
-// flight. Both the duplex and (if active) monitor devices get their OWN cursor
-// instance so their independent clocks never share state. The handoff is
-// non-blocking: if a queue is somehow full, the extra trigger is dropped rather
-// than blocking this (non-RT) goroutine. Implements ui.Player.
+// pending channels with the PER-CLIP gain captured now, so later per-clip
+// changes do not retroactively alter sounds already in flight. The soundboard
+// master ("others hear") and monitor ("you hear") levels are NOT folded in here
+// — each callback applies its own level per buffer in mixInto, so muting one
+// path never silences the other for a clip already in flight. Both the duplex
+// and (if active) monitor devices get their OWN cursor instance so their
+// independent clocks never share state. The handoff is non-blocking: if a queue
+// is somehow full, the extra trigger is dropped rather than blocking this
+// (non-RT) goroutine. Implements ui.Player.
 func (e *Engine) TriggerGain(id string, gain float32) {
 	clip := e.lib.Get(id)
 	if clip == nil {
@@ -394,16 +424,16 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 	if _, err := e.lib.EnsureDecoded(clip); err != nil || len(clip.PCM) == 0 {
 		return
 	}
-	// Clamp the per-clip gain to the same [0, maxGain] range as the mic/master
-	// gains, then fold in the master gain captured now so later master changes
-	// do not retroactively alter sounds already in flight.
-	g := clampGain(gain) * e.masterGain()
-	// A zero effective gain (master muted, or per-clip muted) is pure silence:
-	// drop the trigger instead of enqueuing it. This both saves a mix slot and
-	// upholds gainOf's "zero == unity" convention — that sentinel is only safe
-	// because a genuinely-silent clip is never handed to a callback. Without this
-	// guard a master gain of 0 would reach drainInto as gain:0 and gainOf would
-	// remap it to unity, playing a "muted" clip at FULL volume.
+	// Capture only the per-clip gain, clamped to the same [0, maxGain] range as
+	// the mic/master/monitor gains. The master and monitor levels are applied per
+	// buffer in mixInto, so they are deliberately NOT folded in here.
+	g := clampGain(gain)
+	// A zero PER-CLIP gain is pure silence on every path: drop the trigger instead
+	// of enqueuing it. This both saves a mix slot and upholds gainOf's "zero ==
+	// unity" convention — that sentinel is only safe because a genuinely-silent
+	// clip is never handed to a callback. A muted master or monitor must NOT drop
+	// the trigger here: the OTHER path may still be audible, and each path applies
+	// its own (possibly zero) level in mixInto.
 	if g == 0 {
 		return
 	}
@@ -420,10 +450,12 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 	}
 }
 
-// duplexCallback is the real-time mixer for the mic->cable path. It drains any
-// newly-triggered clips into its own cursor slice, then sums the live mic input
-// with every active clip cursor, clamps, and writes the result to the playback
-// buffer. Allocation-free in steady state and lock-free (no mutex).
+// duplexCallback is the real-time mixer for the mic->cable path (what Discord
+// hears). It drains any newly-triggered clips into its own cursor slice, then
+// sums the live mic input with every active clip cursor — scaling the clips by
+// the soundboard MASTER ("others hear") gain — clamps, and writes the result to
+// the playback buffer. Allocation-free in steady state and lock-free (no mutex).
+// The master gain is read once per buffer via a single atomic load.
 func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	e.cursors = drainInto(e.pending, e.cursors)
 
@@ -441,11 +473,13 @@ func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 			mic[i] *= g
 		}
 	}
-	e.cursors = mixInto(out[:n], mic, e.cursors)
+	e.cursors = mixInto(out[:n], mic, e.cursors, e.masterGain())
 }
 
-// monitorCallback is the real-time mixer for the local monitor device. It plays
-// ONLY clip audio (no mic passthrough).
+// monitorCallback is the real-time mixer for the local monitor device (what the
+// USER hears). It plays ONLY clip audio (no mic passthrough), scaling the clips
+// by the INDEPENDENT monitor ("you hear") gain, read once per buffer via a
+// single atomic load. Allocation-free in steady state and lock-free.
 func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 	_ = pInput
 	e.monCursors = drainInto(e.monPending, e.monCursors)
@@ -455,7 +489,7 @@ func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 	if n > len(out) {
 		n = len(out)
 	}
-	e.monCursors = mixInto(out[:n], nil, e.monCursors)
+	e.monCursors = mixInto(out[:n], nil, e.monCursors, e.monitorGain())
 }
 
 // drainInto pops every clip currently queued in ch and appends a fresh cursor
@@ -487,14 +521,18 @@ func drainPending(ch chan pendingClip) {
 
 // mixInto writes one callback buffer worth of interleaved float32 samples into
 // out. mic (may be nil) is summed in as passthrough; each cursor contributes
-// its remaining samples with a short linear fade-in at the start and fade-out
-// at the end. The accumulator is clamped to [-1,1] per sample. Finished cursors
-// are removed and the surviving slice is returned (reusing the caller's backing
-// array so the hot path does not allocate).
+// its remaining samples scaled by its per-clip gain, the per-buffer soundboard
+// level (master for the duplex path, monitor for the monitor path), and a short
+// linear fade-in at the start / fade-out at the end. The accumulator is clamped
+// to [-1,1] per sample. Finished cursors are removed and the surviving slice is
+// returned (reusing the caller's backing array so the hot path does not
+// allocate). Cursors still advance (and retire) even when soundboard==0, so a
+// muted path drains its queue rather than stalling it.
 //
-// This function is pure (no device/context access) so it is unit-testable
-// without real audio hardware.
-func mixInto(out, mic []float32, cursors []*clipCursor) []*clipCursor {
+// soundboard is passed in (not read from the engine) so this function stays PURE
+// (no device/context access) and unit-testable without real audio hardware: the
+// caller decides which independent level applies to this buffer.
+func mixInto(out, mic []float32, cursors []*clipCursor, soundboard float32) []*clipCursor {
 	// Lay down the mic passthrough (or silence) first.
 	for i := range out {
 		if i < len(mic) {
@@ -507,7 +545,7 @@ func mixInto(out, mic []float32, cursors []*clipCursor) []*clipCursor {
 	frames := len(out) / channels
 
 	for _, c := range cursors {
-		cg := gainOf(c)
+		cg := gainOf(c) * soundboard
 		for f := 0; f < frames; f++ {
 			if c.done() {
 				break

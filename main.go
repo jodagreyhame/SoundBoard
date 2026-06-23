@@ -132,6 +132,10 @@ func main() {
 	// Run in degraded mode: keep the window alive so the user can install
 	// VB-CABLE and relaunch, but do not start the duplex engine.
 	if cableOK {
+		// Log the resolved endpoints right before Configure so a wrong mic (e.g.
+		// the cable accidentally picked as the capture device) is immediately
+		// visible in the diagnostics log instead of manifesting as a silent echo.
+		log.Printf("audio endpoints: capturing mic %q -> playing into cable %q", mic.Name, cable.Name)
 		if err := engine.Configure(mic, cable); err != nil {
 			log.Printf("configure engine: %v (running without audio routing)", err)
 		} else if err := engine.Start(); err != nil {
@@ -143,6 +147,10 @@ func main() {
 			// path only sends the mix to the cable (-> Discord); without a monitor
 			// the user hears nothing. Pick the default output device, never the
 			// virtual cable (monitoring into the cable would be silent + loop).
+			// applyVolumes above already seeded the monitor gain (default unity), so
+			// the moment the monitor device is enabled the user hears clips at the
+			// saved "what you hear" level — independent of the master "what others
+			// hear" level on the duplex path.
 			if spk, ok := resolveSpeakers(playback); ok {
 				if err := engine.SetMonitor(&spk); err != nil {
 					log.Printf("enable local monitor: %v", err)
@@ -188,11 +196,13 @@ func main() {
 	app.Run()
 }
 
-// applyVolumes seeds the engine's mic/master gains from saved settings,
-// defaulting missing (zero) values to unity.
+// applyVolumes seeds the engine's mic/master/monitor gains from saved settings,
+// defaulting missing (zero) values to unity. The monitor seed matters most: at
+// unity the user HEARS clips on their local monitor by default.
 func applyVolumes(engine *audio.Engine, s *config.Settings) {
 	engine.SetMicGain(orUnity(s.Volumes.Mic))
 	engine.SetMasterGain(orUnity(s.Volumes.Master))
+	engine.SetMonitorGain(orUnity(s.Volumes.Monitor))
 }
 
 // clipGain returns the saved per-clip gain for id, defaulting to unity.
@@ -257,6 +267,14 @@ func (v *volController) SetMaster(g float32) {
 	v.settings.Volumes.Master = g
 }
 
+// SetMonitor sets the local monitor level — the soundboard volume the USER hears
+// in their own headset — independent of SetMaster (what Discord hears). It pushes
+// the new level to the engine's monitor path and persists it.
+func (v *volController) SetMonitor(g float32) {
+	v.engine.SetMonitorGain(g)
+	v.settings.Volumes.Monitor = g
+}
+
 func (v *volController) SetClip(id string, g float32) {
 	if v.settings.Volumes.PerClip == nil {
 		v.settings.Volumes.PerClip = map[string]float32{}
@@ -266,6 +284,7 @@ func (v *volController) SetClip(id string, g float32) {
 
 func (v *volController) Mic() float32           { return orUnity(v.settings.Volumes.Mic) }
 func (v *volController) Master() float32        { return orUnity(v.settings.Volumes.Master) }
+func (v *volController) Monitor() float32       { return orUnity(v.settings.Volumes.Monitor) }
 func (v *volController) Clip(id string) float32 { return clipGain(v.settings, id) }
 
 // setupController adapts internal/setup to ui.SetupController. It tracks not just
@@ -360,9 +379,19 @@ func soundsRoot() (fs.FS, string) {
 	return os.DirFS(base), base
 }
 
+// isCableName reports whether a device name belongs to the VB-CABLE virtual
+// audio device (CABLE Input / CABLE Output). Shared by resolveMic and
+// resolveSpeakers so neither ever picks the cable as a real endpoint.
+func isCableName(name string) bool {
+	return strings.Contains(strings.ToUpper(name), "CABLE")
+}
+
 func resolveMic(capture []devices.Device, name string) (devices.Device, bool) {
-	// An explicit saved mic name always wins.
-	if name != "" {
+	// An explicit saved mic name always wins — but NEVER resolve to the cable: once
+	// routing is engaged the default/ saved capture endpoint may be CABLE Output,
+	// and capturing it would feed the cable back into itself (an echo/loop with no
+	// real voice). A cable name here is treated as "unset" and we fall through.
+	if name != "" && !isCableName(name) {
 		if d, ok := devices.FindByName(capture, name); ok {
 			return d, true
 		}
@@ -370,10 +399,22 @@ func resolveMic(capture []devices.Device, name string) (devices.Device, bool) {
 	// If routing was engaged, the live Windows default capture endpoint is now
 	// the cable — capturing it would feed the cable back into itself. Prefer the
 	// real mic that EngageRouting saved BEFORE the hijack.
-	if d, ok := setup.PreviousDefaultMic(); ok {
+	if d, ok := setup.PreviousDefaultMic(); ok && !isCableName(d.Name) {
 		return d, true
 	}
-	return devices.DefaultMic(capture)
+	// Fall back to the system default mic, but skip it if it is the cable (after
+	// routing engages the default capture IS the cable). In that case pick the
+	// first non-cable capture device so we never hand the engine the cable as its
+	// microphone. Mirrors resolveSpeakers' non-cable fallback.
+	if d, ok := devices.DefaultMic(capture); ok && !isCableName(d.Name) {
+		return d, true
+	}
+	for _, d := range capture {
+		if !isCableName(d.Name) {
+			return d, true
+		}
+	}
+	return devices.Device{}, false
 }
 
 func resolveCable(playback []devices.Device, name string) (devices.Device, bool) {
@@ -395,7 +436,7 @@ func resolveSpeakers(playback []devices.Device) (devices.Device, bool) {
 	var fallback devices.Device
 	var haveFallback bool
 	for _, d := range playback {
-		if strings.Contains(strings.ToUpper(d.Name), "CABLE") {
+		if isCableName(d.Name) {
 			continue // never monitor into the virtual cable
 		}
 		if !haveFallback {

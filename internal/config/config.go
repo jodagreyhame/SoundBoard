@@ -36,12 +36,17 @@ type Settings struct {
 }
 
 // Volumes are the soundboard mixer levels, all linear amplitudes where 1.0
-// means unchanged. Mic scales the live mic passthrough; Master scales every
-// clip; PerClip maps a clip ID to its own multiplier (applied on top of
-// Master). A missing or zero PerClip entry means unity.
+// means unchanged. The three top-level levels are INDEPENDENT:
+//   - Mic     scales the live mic passthrough (how loud YOUR VOICE is to Discord).
+//   - Master  scales every clip on the path to Discord (what OTHERS hear).
+//   - Monitor scales every clip on the local path (what YOU hear in your headset).
+//
+// PerClip maps a clip ID to its own multiplier, applied on top of both Master
+// and Monitor. A missing or zero PerClip entry means unity.
 type Volumes struct {
 	Mic     float32            `json:"mic,omitempty"`
 	Master  float32            `json:"master,omitempty"`
+	Monitor float32            `json:"monitor,omitempty"`
 	PerClip map[string]float32 `json:"perClip,omitempty"`
 }
 
@@ -55,9 +60,11 @@ type WindowPrefs struct {
 }
 
 // normalize fills in safe defaults so callers never read a zero mixer level or
-// nil PerClip map. A missing or zero Mic/Master means unity (1.0); a nil
+// nil PerClip map. A missing or zero Mic/Master/Monitor means unity (1.0); a nil
 // PerClip becomes an empty map. This is applied after Load so the in-app mixer
 // starts at full volume on a fresh config and is never nil-dereferenced.
+// Monitor defaults to unity so a user upgrading from a pre-Monitor config still
+// HEARS their clips locally.
 func (s *Settings) normalize() {
 	if s.Hotkeys == nil {
 		s.Hotkeys = map[string]string{}
@@ -67,6 +74,9 @@ func (s *Settings) normalize() {
 	}
 	if s.Volumes.Master == 0 {
 		s.Volumes.Master = 1
+	}
+	if s.Volumes.Monitor == 0 {
+		s.Volumes.Monitor = 1
 	}
 	if s.Volumes.PerClip == nil {
 		s.Volumes.PerClip = map[string]float32{}

@@ -47,6 +47,9 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if s.Volumes.Master != 1 {
 		t.Errorf("Load() defaults: Volumes.Master = %v, want 1", s.Volumes.Master)
 	}
+	if s.Volumes.Monitor != 1 {
+		t.Errorf("Load() defaults: Volumes.Monitor = %v, want 1", s.Volumes.Monitor)
+	}
 	if s.Volumes.PerClip == nil {
 		t.Error("Load() defaults: Volumes.PerClip should be initialized, got nil")
 	}
@@ -67,8 +70,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 			"ctrl+alt+2": "games/level-up",
 		},
 		Volumes: Volumes{
-			Mic:    0.8,
-			Master: 0.5,
+			Mic:     0.8,
+			Master:  0.5,
+			Monitor: 0.6,
 			PerClip: map[string]float32{
 				"memes/airhorn": 1.25,
 			},
@@ -92,9 +96,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 func TestLoadNormalizesPartialVolumes(t *testing.T) {
 	pointConfigDir(t)
 
-	// A saved config that set only Master (e.g. an older write path) must load
-	// back with Mic defaulted to unity, a non-nil PerClip map, and the stored
-	// Master preserved.
+	// A saved config that set only Master (e.g. an older pre-Monitor write path)
+	// must load back with Mic AND Monitor defaulted to unity, a non-nil PerClip
+	// map, and the stored Master preserved. The Monitor default matters most: an
+	// upgraded config without it must still let the user HEAR their clips.
 	stored := &Settings{
 		Hotkeys: map[string]string{},
 		Volumes: Volumes{Master: 0.3},
@@ -109,6 +114,9 @@ func TestLoadNormalizesPartialVolumes(t *testing.T) {
 	}
 	if got.Volumes.Mic != 1 {
 		t.Errorf("Volumes.Mic = %v, want 1 (defaulted)", got.Volumes.Mic)
+	}
+	if got.Volumes.Monitor != 1 {
+		t.Errorf("Volumes.Monitor = %v, want 1 (defaulted for pre-Monitor config)", got.Volumes.Monitor)
 	}
 	if got.Volumes.Master != 0.3 {
 		t.Errorf("Volumes.Master = %v, want 0.3 (preserved)", got.Volumes.Master)
