@@ -24,6 +24,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/gen2brain/malgo"
@@ -137,6 +138,20 @@ func main() {
 			log.Printf("start engine: %v (running without audio routing)", err)
 		} else {
 			defer func() { _ = engine.Stop() }()
+			// Local monitor: also play triggered clips to the user's real
+			// speakers/headphones so they actually HEAR the soundboard. The duplex
+			// path only sends the mix to the cable (-> Discord); without a monitor
+			// the user hears nothing. Pick the default output device, never the
+			// virtual cable (monitoring into the cable would be silent + loop).
+			if spk, ok := resolveSpeakers(playback); ok {
+				if err := engine.SetMonitor(&spk); err != nil {
+					log.Printf("enable local monitor: %v", err)
+				} else {
+					log.Printf("monitor: clips also play on %q", spk.Name)
+				}
+			} else {
+				log.Printf("no local output device found; you will not hear your own clips")
+			}
 		}
 	} else {
 		log.Printf("VB-CABLE absent: starting in setup mode (no audio routing). Install VB-CABLE and relaunch.")
@@ -368,4 +383,27 @@ func resolveCable(playback []devices.Device, name string) (devices.Device, bool)
 		}
 	}
 	return devices.FindCableInput(playback)
+}
+
+// resolveSpeakers picks the real output device to monitor clips on — the user's
+// actual speakers/headphones — explicitly EXCLUDING the virtual cable (playing
+// the monitor into the cable would be silent to the user and just loop back to
+// Discord). It prefers the default playback device; if that is the cable (the
+// VB-CABLE installer sometimes makes CABLE Input the default output), it falls
+// back to the first non-cable playback device.
+func resolveSpeakers(playback []devices.Device) (devices.Device, bool) {
+	var fallback devices.Device
+	var haveFallback bool
+	for _, d := range playback {
+		if strings.Contains(strings.ToUpper(d.Name), "CABLE") {
+			continue // never monitor into the virtual cable
+		}
+		if !haveFallback {
+			fallback, haveFallback = d, true
+		}
+		if d.IsDefault {
+			return d, true
+		}
+	}
+	return fallback, haveFallback
 }
