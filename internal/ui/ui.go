@@ -16,6 +16,8 @@ package ui
 
 import (
 	_ "embed"
+	"os"
+	"os/exec"
 
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
@@ -199,6 +201,22 @@ func (a *App) quit() {
 	if a.fyneApp != nil {
 		a.fyneApp.Quit()
 	}
+}
+
+// restart launches a fresh instance of SoundBoard and then quits this one.
+// Used after a VB-CABLE install so the new process initializes a clean audio
+// context that enumerates the just-added cable endpoints and auto-engages
+// routing — an APP restart, NOT a Windows reboot. If the new process cannot be
+// launched it falls back to just quitting.
+func (a *App) restart() {
+	if exe, err := os.Executable(); err == nil {
+		cmd := exec.Command(exe)
+		if wd, werr := os.Getwd(); werr == nil {
+			cmd.Dir = wd
+		}
+		_ = cmd.Start()
+	}
+	a.quit()
 }
 
 // recordWindowSize pushes the current window content size into the WindowStore

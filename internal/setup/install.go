@@ -111,7 +111,29 @@ func installCable(ctx context.Context) error {
 		return err
 	}
 
-	return runElevatedAndWait(ctx, exePath, "-i -h")
+	// Run the installer AND immediately try to surface the new endpoints in THIS
+	// Windows session — a PnP device rescan plus an Audio Endpoint Builder service
+	// restart (which cascades to Windows Audio) — so a full Windows reboot can be
+	// avoided on machines whose audio services have no third-party dependencies.
+	// All steps run in ONE elevated process (a single UAC prompt). On machines
+	// that genuinely still need a reboot, the cable simply won't enumerate until
+	// restart, and the caller detects that and says so. The service bounce briefly
+	// drops all system audio for a moment — expected, not a failure.
+	batPath := filepath.Join(tmp, "vbcable_install.bat")
+	script := "@echo off\r\n" +
+		`"` + exePath + `" -i -h` + "\r\n" +
+		"pnputil /scan-devices >nul 2>&1\r\n" +
+		`powershell -NoProfile -ExecutionPolicy Bypass -Command "Restart-Service -Name 'AudioEndpointBuilder' -Force -ErrorAction SilentlyContinue"` + " >nul 2>&1\r\n" +
+		"exit /b 0\r\n"
+	if err := os.WriteFile(batPath, []byte(script), 0o600); err != nil {
+		return fmt.Errorf("setup: write install script: %w", err)
+	}
+
+	comspec := os.Getenv("ComSpec")
+	if comspec == "" {
+		comspec = `C:\Windows\System32\cmd.exe`
+	}
+	return runElevatedAndWait(ctx, comspec, `/c "`+batPath+`"`)
 }
 
 // downloadAny tries each URL in order and writes the first successful response

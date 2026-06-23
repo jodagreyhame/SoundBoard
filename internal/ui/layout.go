@@ -116,14 +116,27 @@ func (a *App) onFixRouting() {
 				dialog.ShowInformation("Routing engaged",
 					"Discord now hears the soundboard automatically — no changes needed inside Discord. "+
 						"Your real microphone is restored when you quit SoundBoard.", a.win)
-			} else {
-				// VB-CABLE almost always needs a full Windows reboot before its
-				// endpoints enumerate; an app-only restart is not enough.
-				dialog.ShowInformation("VB-CABLE installed — reboot required",
-					"VB-CABLE was installed. Reboot Windows, then relaunch SoundBoard. "+
-						"The virtual cable will NOT appear until you restart your PC.", a.win)
+				a.refreshBanner()
+				return
 			}
-			a.refreshBanner()
+			// The installer also rescanned devices and bounced the Audio Endpoint
+			// Builder, so on most machines the cable is already present in this
+			// Windows session — NO reboot. We just need a fresh process to pick it
+			// up (a clean audio context that enumerates the new cable and
+			// auto-engages routing), which is an APP restart, not a Windows reboot.
+			// If the cable still isn't there after the restart, that machine
+			// genuinely needs a Windows reboot — the relaunched app will show that.
+			dialog.ShowConfirm("VB-CABLE installed",
+				"VB-CABLE is installed and Windows audio was refreshed — on most PCs this "+
+					"needs NO Windows reboot.\n\nSoundBoard just needs to restart (the app, "+
+					"not Windows) to pick up the cable and route automatically. Restart now?",
+				func(ok bool) {
+					if ok {
+						a.restart()
+						return
+					}
+					a.refreshBanner()
+				}, a.win)
 		})
 	}()
 }
