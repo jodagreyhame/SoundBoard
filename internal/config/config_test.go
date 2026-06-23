@@ -111,6 +111,37 @@ func TestLoadNormalizesProcessing(t *testing.T) {
 	}
 }
 
+// TestProcessingNormalizeEdges pins the remaining normalize() branches the other
+// tests don't reach: a NEGATIVE gate sensitivity clamps up to 0 (not to the
+// default), and every one of the four valid MicModes is preserved verbatim
+// rather than being coerced to "vad". Driven directly through normalize() so the
+// table stays cheap and doesn't touch the disk.
+func TestProcessingNormalizeEdges(t *testing.T) {
+	// A negative sensitivity is out of range low; the contract clamps it to 0
+	// (max sensitivity), distinct from the 0->default coercion.
+	neg := AudioProcessing{MicMode: MicModeAlways, GateSensitivity: -3}
+	neg.normalize()
+	if neg.GateSensitivity != 0 {
+		t.Errorf("negative GateSensitivity = %v, want 0 (clamped)", neg.GateSensitivity)
+	}
+	if neg.MicMode != MicModeAlways {
+		t.Errorf("MicMode = %q, want %q (valid mode preserved)", neg.MicMode, MicModeAlways)
+	}
+
+	// Each valid mode must survive normalize() unchanged; a non-zero sensitivity
+	// in range must also be preserved (not re-defaulted).
+	for _, mode := range []string{MicModeVAD, MicModePTT, MicModeAlways, MicModeMute} {
+		p := AudioProcessing{MicMode: mode, GateSensitivity: 0.5}
+		p.normalize()
+		if p.MicMode != mode {
+			t.Errorf("MicMode %q not preserved, got %q", mode, p.MicMode)
+		}
+		if p.GateSensitivity != 0.5 {
+			t.Errorf("MicMode %q: GateSensitivity = %v, want 0.5 (preserved)", mode, p.GateSensitivity)
+		}
+	}
+}
+
 // TestFavoritesRoundTrip pins that a non-empty, ORDERED favourites list survives
 // a Save/Load cycle unchanged. Order matters: the UI pins favourites in this
 // sequence, so a reordering bug would silently reshuffle the user's section.

@@ -188,6 +188,17 @@ type App struct {
 	// selectClip binds a clip to the per-clip volume slider. Assigned in
 	// buildVolumeArea; nil before Run.
 	selectClip func(clip *catalog.Clip)
+
+	// gateStop stops the Audio panel's live mic-open meter ticker. Non-nil only
+	// while the meter is running; closed on quit and on a content rebuild so the
+	// polling goroutine never outlives the window. nil when no Audio panel.
+	gateStop chan struct{}
+
+	// gateUpdate refreshes the live mic-open meter from AudioController.GateLevel.
+	// buildGateMeter assigns it; the ticker (started in Run) and tests call it.
+	// Mutating widgets, it must run on the Fyne thread (the ticker wraps it in
+	// fyne.Do). nil when no Audio panel is built.
+	gateUpdate func()
 }
 
 // New constructs the App with its dependencies. It does not build any Fyne
@@ -239,6 +250,10 @@ func (a *App) WithAudio(c AudioController) *App {
 // the tray (SetCloseIntercept); the tray's Quit item exits the app.
 func (a *App) Run() {
 	a.build(fyneapp.New())
+	// Start the live mic-open meter ticker for the real GUI (no-op when no Audio
+	// panel). Headless tests build without Run and drive the meter directly, so
+	// they never spawn this goroutine.
+	a.startGateTicker()
 	a.win.Show()
 	a.fyneApp.Run()
 }
@@ -302,6 +317,7 @@ func (a *App) ShowWindow() {
 // window size first so it is persisted by main's deferred settings Save.
 func (a *App) quit() {
 	a.recordWindowSize()
+	a.stopGateTicker()
 	if a.fyneApp != nil {
 		a.fyneApp.Quit()
 	}

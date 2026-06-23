@@ -201,6 +201,31 @@ type Engine struct {
 	// cursors / monCursors are owned exclusively by their RT callback.
 	cursors    []*clipCursor // duplex (mic+SFX) device cursors
 	monCursors []*clipCursor // monitor device cursors
+
+	// --- Mic-path DSP plumbing (see worker.go / dsp.go) ---
+	//
+	// inRing carries DOWNMIXED mono mic samples from duplexCallback (producer) to
+	// the worker (consumer); outRing carries PROCESSED mono back from the worker
+	// (producer) to duplexCallback (consumer). Both are lock-free SPSC rings,
+	// allocated once in Configure and reset on teardown so the RT path never
+	// allocates. The worker is launched in Start and stopped in Stop.
+	inRing  *ringSPSC
+	outRing *ringSPSC
+	worker  *micWorker
+
+	// duplexCallback-owned scratch, preallocated in Configure so the RT path is
+	// allocation-free: monIn holds the downmixed mono mic for a buffer, monOut the
+	// processed mono pulled back from the worker. Sized to one period of frames;
+	// only ever touched by the duplex callback.
+	monIn  []float32
+	monOut []float32
+
+	// carrier is the phase-continuous voiced bed added to the CABLE output only
+	// when ForceThrough is on. Owned by the duplex callback (phase advances there);
+	// allocated in Configure. duckEnv is the duplex callback's ducking envelope
+	// follower (clip<->mic cross-gain), also callback-owned.
+	carrier *carrierOsc
+	duckEnv float32
 }
 
 // NewEngine creates an engine bound to a context and the decoded library.
@@ -286,6 +311,17 @@ func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 
 	e.mic = mic
 	e.cable = cable
+
+	// Allocate the mic-DSP plumbing once, here, off the audio thread. The rings
+	// hold mono samples (one per stereo frame), so they are sized in mono samples;
+	// the scratch buffers are one period of mono frames. Doing this in Configure
+	// (not per callback) keeps duplexCallback allocation-free.
+	e.inRing = newRing(ringCapFrames * dspFrame)
+	e.outRing = newRing(ringCapFrames * dspFrame)
+	e.monIn = make([]float32, periodFrames)
+	e.monOut = make([]float32, periodFrames)
+	e.carrier = newCarrier()
+	e.duckEnv = 0
 
 	cfg := malgo.DefaultDeviceConfig(malgo.Duplex)
 	cfg.SampleRate = sampleRate
@@ -393,12 +429,27 @@ func (e *Engine) Start() error {
 	if e.duplexDev == nil {
 		return errors.New("audio: not configured")
 	}
+	// Launch the mic-DSP worker BEFORE the device starts so the output ring is
+	// already being filled when the first callback fires (avoiding an initial burst
+	// of passthrough). Configure allocated the rings; startWorker builds the
+	// denoiser/filters and the goroutine. Reset the rings first so a restart begins
+	// with empty buffers rather than stale samples.
+	if e.inRing != nil {
+		e.inRing.reset()
+	}
+	if e.outRing != nil {
+		e.outRing.reset()
+	}
+	e.startWorker()
+
 	if err := e.duplexDev.Start(); err != nil {
+		e.stopWorker()
 		return err
 	}
 	if e.monitorDev != nil {
 		if err := e.monitorDev.Start(); err != nil {
 			_ = e.duplexDev.Stop()
+			e.stopWorker()
 			return err
 		}
 	}
@@ -424,6 +475,20 @@ func (e *Engine) Stop() error {
 	freeCPtr(&e.micIDPtr)
 	freeCPtr(&e.cableIDPtr)
 	freeCPtr(&e.monIDPtr)
+
+	// The duplex device is uninitialized (Uninit synchronously drains its
+	// callback), so no callback is pushing/pulling the rings: it is now safe to stop
+	// the worker, free its native denoiser, and reset both rings. Order matters —
+	// stop the worker only AFTER the device so the worker is never racing a live
+	// callback on the rings.
+	e.stopWorker()
+	if e.inRing != nil {
+		e.inRing.reset()
+	}
+	if e.outRing != nil {
+		e.outRing.reset()
+	}
+	e.setGateLevel(0)
 
 	// Devices are uninitialized, so no callback is running: it is safe to drop
 	// the (callback-owned) cursor slices and drain the handoff channels here.
@@ -500,32 +565,9 @@ func (e *Engine) StopAll() {
 	e.monStopFlag.Store(true)
 }
 
-// duplexCallback is the real-time mixer for the mic->cable path (what Discord
-// hears). It drains any newly-triggered clips into its own cursor slice, then
-// sums the live mic input with every active clip cursor — scaling the clips by
-// the soundboard MASTER ("others hear") gain — clamps, and writes the result to
-// the playback buffer. Allocation-free in steady state and lock-free (no mutex).
-// The master gain is read once per buffer via a single atomic load.
-func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
-	e.cursors = drainInto(e.pending, e.cursors)
-	e.cursors = clearOnStop(&e.stopFlag, e.cursors, e.pending)
-
-	out := bytesAsF32(pOutput)
-	mic := bytesAsF32(pInput)
-	n := int(frameCount) * channels
-	if n > len(out) {
-		n = len(out)
-	}
-	// Apply the live mic-passthrough gain in place on the input view before
-	// mixing. miniaudio hands us a fresh input buffer each call, so scaling it
-	// here is safe and allocation-free. Skip the loop at unity to stay cheap.
-	if g := e.micGain(); g != 1 {
-		for i := range mic {
-			mic[i] *= g
-		}
-	}
-	e.cursors = mixInto(out[:n], mic, e.cursors, e.masterGain())
-}
+// The real-time mic->cable data callback (duplexCallback) and its helpers
+// (processMicThroughWorker, duckedMaster) live in miccallback.go. The monitor
+// callback stays here because it shares no mic-DSP state.
 
 // monitorCallback is the real-time mixer for the local monitor device (what the
 // USER hears). It plays ONLY clip audio (no mic passthrough), scaling the clips

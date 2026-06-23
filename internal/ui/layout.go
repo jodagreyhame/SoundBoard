@@ -27,15 +27,37 @@ const (
 	gainStep = 0.01
 )
 
-// buildContent assembles the full window layout: setup banner on top, volume
-// area on the bottom, and the search box + category clip sections filling the
-// center.
+// buildContent assembles the full window layout: the setup banner always sits
+// on top. The body is the Soundboard view (clip browser + volume panel). When an
+// AudioController is wired, the body becomes a two-tab view — "Soundboard" and
+// "Audio" — so the mic-processing controls get a clean home without cluttering
+// the clip browser. Without an AudioController the layout is unchanged.
 func (a *App) buildContent() fyne.CanvasObject {
-	return container.NewBorder(
-		a.buildSetupBanner(), // top
-		a.buildVolumeArea(),  // bottom
+	// A content rebuild (e.g. refreshBanner) replaces every widget, so stop any
+	// live mic-open meter ticker from the previous build before wiring new ones.
+	a.stopGateTicker()
+
+	soundboard := container.NewBorder(
+		nil,                 // top (banner is added once, above the tabs)
+		a.buildVolumeArea(), // bottom
 		nil, nil,
 		a.buildClipBrowser(), // center
+	)
+
+	var body fyne.CanvasObject = soundboard
+	if audio := a.buildAudioPanel(); audio != nil {
+		tabs := container.NewAppTabs(
+			container.NewTabItemWithIcon("Soundboard", theme.MediaMusicIcon(), soundboard),
+			container.NewTabItemWithIcon("Audio", theme.SettingsIcon(), audio),
+		)
+		tabs.SetTabLocation(container.TabLocationTop)
+		body = tabs
+	}
+
+	return container.NewBorder(
+		a.buildSetupBanner(), // top
+		nil, nil, nil,
+		body, // center
 	)
 }
 
@@ -147,6 +169,10 @@ func (a *App) onFixRouting() {
 func (a *App) refreshBanner() {
 	if a.win != nil {
 		a.win.SetContent(a.buildContent())
+		// buildContent stopped the old meter ticker and rebuilt the panel (with a
+		// fresh gateUpdate closure bound to the new widgets); restart it so the
+		// live meter keeps running after the rebuild. No-op without an Audio panel.
+		a.startGateTicker()
 	}
 }
 

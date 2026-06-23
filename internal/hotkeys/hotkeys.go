@@ -23,6 +23,7 @@ type binding struct {
 type Manager struct {
 	mu       sync.Mutex
 	fn       func(clipID string)
+	pttFn    func(down bool)
 	bindings []*binding
 	done     chan struct{}
 	closed   bool
@@ -71,6 +72,35 @@ func (m *Manager) Register(combo string, clipID string) error {
 	m.bindings = append(m.bindings, &binding{hk: hk, clipID: clipID})
 	m.mu.Unlock()
 	return nil
+}
+
+// OnPTT sets the unified push-to-talk callback, invoked with down=true when the
+// PTT key is pressed and down=false when it is released. It mirrors OnTrigger for
+// clip hotkeys: set the callback once, then bind/rebind the combo with SetPTT.
+// The callback is stored and used by any subsequent SetPTT; changing it does NOT
+// re-bind an already-registered PTT hotkey (call SetPTT again to do that).
+func (m *Manager) OnPTT(fn func(down bool)) {
+	m.mu.Lock()
+	m.pttFn = fn
+	m.mu.Unlock()
+}
+
+// SetPTT binds (or rebinds) the push-to-talk hotkey to combo, dispatching press
+// and release through the callback set with OnPTT. An empty combo clears any
+// existing PTT binding and returns nil. It is the OnPTT-paired counterpart to
+// RegisterPTT (which takes explicit onDown/onUp); both share the same single PTT
+// slot, so calling either replaces a prior binding. A parse/registration error
+// leaves any prior binding in place.
+func (m *Manager) SetPTT(combo string) error {
+	m.mu.Lock()
+	fn := m.pttFn
+	m.mu.Unlock()
+	var onDown, onUp func()
+	if fn != nil {
+		onDown = func() { fn(true) }
+		onUp = func() { fn(false) }
+	}
+	return m.RegisterPTT(combo, onDown, onUp)
 }
 
 // RegisterPTT registers a push-to-talk hotkey from a combo like "ctrl+grave" and
