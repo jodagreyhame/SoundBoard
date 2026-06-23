@@ -40,15 +40,17 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 		t.Errorf("Load() defaults: expected zero-value fields, got %+v", s)
 	}
 	// Volumes default to unity gain with a non-nil PerClip map so the in-app
-	// mixer starts at full volume and is never nil-dereferenced.
-	if s.Volumes.Mic != 1 {
-		t.Errorf("Load() defaults: Volumes.Mic = %v, want 1", s.Volumes.Mic)
+	// mixer starts at full volume and is never nil-dereferenced. The levels are
+	// pointers (nil = unset) seeded to unity by normalize; the effective-gain
+	// accessors report 1.0 here.
+	if s.Volumes.MicGain() != 1 {
+		t.Errorf("Load() defaults: Volumes.Mic = %v, want 1", s.Volumes.MicGain())
 	}
-	if s.Volumes.Master != 1 {
-		t.Errorf("Load() defaults: Volumes.Master = %v, want 1", s.Volumes.Master)
+	if s.Volumes.MasterGain() != 1 {
+		t.Errorf("Load() defaults: Volumes.Master = %v, want 1", s.Volumes.MasterGain())
 	}
-	if s.Volumes.Monitor != 1 {
-		t.Errorf("Load() defaults: Volumes.Monitor = %v, want 1", s.Volumes.Monitor)
+	if s.Volumes.MonitorGain() != 1 {
+		t.Errorf("Load() defaults: Volumes.Monitor = %v, want 1", s.Volumes.MonitorGain())
 	}
 	if s.Volumes.PerClip == nil {
 		t.Error("Load() defaults: Volumes.PerClip should be initialized, got nil")
@@ -180,9 +182,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 			"ctrl+alt+2": "games/level-up",
 		},
 		Volumes: Volumes{
-			Mic:     0.8,
-			Master:  0.5,
-			Monitor: 0.6,
+			Mic:     FloatPtr(0.8),
+			Master:  FloatPtr(0.5),
+			Monitor: FloatPtr(0.6),
 			PerClip: map[string]float32{
 				"memes/airhorn": 1.25,
 			},
@@ -225,7 +227,7 @@ func TestLoadNormalizesPartialVolumes(t *testing.T) {
 	// upgraded config without it must still let the user HEAR their clips.
 	stored := &Settings{
 		Hotkeys: map[string]string{},
-		Volumes: Volumes{Master: 0.3},
+		Volumes: Volumes{Master: FloatPtr(0.3)},
 	}
 	if err := stored.Save(); err != nil {
 		t.Fatalf("Save() error: %v", err)
@@ -235,17 +237,59 @@ func TestLoadNormalizesPartialVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if got.Volumes.Mic != 1 {
-		t.Errorf("Volumes.Mic = %v, want 1 (defaulted)", got.Volumes.Mic)
+	if got.Volumes.MicGain() != 1 {
+		t.Errorf("Volumes.Mic = %v, want 1 (defaulted)", got.Volumes.MicGain())
 	}
-	if got.Volumes.Monitor != 1 {
-		t.Errorf("Volumes.Monitor = %v, want 1 (defaulted for pre-Monitor config)", got.Volumes.Monitor)
+	if got.Volumes.MonitorGain() != 1 {
+		t.Errorf("Volumes.Monitor = %v, want 1 (defaulted for pre-Monitor config)", got.Volumes.MonitorGain())
 	}
-	if got.Volumes.Master != 0.3 {
-		t.Errorf("Volumes.Master = %v, want 0.3 (preserved)", got.Volumes.Master)
+	if got.Volumes.MasterGain() != 0.3 {
+		t.Errorf("Volumes.Master = %v, want 0.3 (preserved)", got.Volumes.MasterGain())
 	}
 	if got.Volumes.PerClip == nil {
 		t.Error("Volumes.PerClip is nil, want initialized empty map")
+	}
+}
+
+// TestExplicitMuteRoundTrips is the regression for the "deliberate mute silently
+// un-mutes on next launch" bug. A user who drags Master (what Discord hears) to 0%
+// — or Mic to 0% — must find it STILL muted after a restart, not auto-reset to
+// 100%. An explicit 0 is a non-nil pointer, so it persists as `0` and reloads as a
+// real mute; only a genuinely UNSET (nil) channel defaults to unity.
+func TestExplicitMuteRoundTrips(t *testing.T) {
+	pointConfigDir(t)
+
+	stored := &Settings{
+		Hotkeys: map[string]string{},
+		Volumes: Volumes{
+			Master: FloatPtr(0), // deliberately mute what Discord hears
+			Mic:    FloatPtr(0), // deliberately mute the user's own voice
+			// Monitor left nil (unset) -> must default to unity.
+		},
+	}
+	if err := stored.Save(); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got.Volumes.Master == nil || *got.Volumes.Master != 0 {
+		t.Errorf("Master mute did not round-trip: got %v, want explicit 0", got.Volumes.Master)
+	}
+	if got.Volumes.MasterGain() != 0 {
+		t.Errorf("MasterGain() = %v, want 0 (mute preserved, NOT coerced to unity)", got.Volumes.MasterGain())
+	}
+	if got.Volumes.Mic == nil || *got.Volumes.Mic != 0 {
+		t.Errorf("Mic mute did not round-trip: got %v, want explicit 0", got.Volumes.Mic)
+	}
+	if got.Volumes.MicGain() != 0 {
+		t.Errorf("MicGain() = %v, want 0 (mute preserved)", got.Volumes.MicGain())
+	}
+	// The unset Monitor must still default to unity so the user hears clips locally.
+	if got.Volumes.MonitorGain() != 1 {
+		t.Errorf("MonitorGain() = %v, want 1 (unset channel defaults to unity)", got.Volumes.MonitorGain())
 	}
 }
 

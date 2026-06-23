@@ -122,12 +122,44 @@ func validMicMode(m string) bool {
 //
 // PerClip maps a clip ID to its own multiplier, applied on top of both Master
 // and Monitor. A missing or zero PerClip entry means unity.
+//
+// Mic/Master/Monitor are POINTERS so the config can tell "unset" (nil — an
+// upgraded/fresh config that never wrote a level, which must default to unity so
+// the user still hears clips) apart from an EXPLICIT 0 (a deliberate mute the user
+// dragged, which must round-trip rather than silently un-mute on the next launch).
+// A non-nil pointer to 0 persists as `"master": 0` and reloads as a real mute; a
+// nil pointer is omitted from JSON and seeded to unity by normalize(). Use the
+// MicGain/MasterGain/MonitorGain accessors to read an effective value (nil ->
+// unity) without dereferencing.
 type Volumes struct {
-	Mic     float32            `json:"mic,omitempty"`
-	Master  float32            `json:"master,omitempty"`
-	Monitor float32            `json:"monitor,omitempty"`
+	Mic     *float32           `json:"mic,omitempty"`
+	Master  *float32           `json:"master,omitempty"`
+	Monitor *float32           `json:"monitor,omitempty"`
 	PerClip map[string]float32 `json:"perClip,omitempty"`
 }
+
+// FloatPtr returns a pointer to a copy of v. Callers use it to set an EXPLICIT
+// Volumes level — including an explicit 0 mute — so the value round-trips through
+// JSON instead of being treated as unset and coerced back to unity.
+func FloatPtr(v float32) *float32 { return &v }
+
+// orUnity returns the pointed-to value, or 1.0 (unity) when p is nil (unset).
+// Centralizes the "nil means unity, explicit 0 means muted" rule so an explicit 0
+// is honoured everywhere instead of being coerced back to full volume.
+func orUnity(p *float32) float32 {
+	if p == nil {
+		return 1
+	}
+	return *p
+}
+
+// MicGain/MasterGain/MonitorGain return the effective level for each independent
+// channel: the explicitly-configured value (including an explicit 0 mute) when set,
+// else unity. Callers (the engine seeding, the UI sliders) use these so a saved
+// mute is respected and an unset channel still defaults to full volume.
+func (v Volumes) MicGain() float32     { return orUnity(v.Mic) }
+func (v Volumes) MasterGain() float32  { return orUnity(v.Master) }
+func (v Volumes) MonitorGain() float32 { return orUnity(v.Monitor) }
 
 // WindowPrefs persists the main window's last content size so the app reopens at
 // the size the user left it. Width/Height of 0 mean "use the default size". The
@@ -138,24 +170,24 @@ type WindowPrefs struct {
 	Height float32 `json:"height,omitempty"`
 }
 
-// normalize fills in safe defaults so callers never read a zero mixer level or
-// nil PerClip map. A missing or zero Mic/Master/Monitor means unity (1.0); a nil
-// PerClip becomes an empty map. This is applied after Load so the in-app mixer
-// starts at full volume on a fresh config and is never nil-dereferenced.
-// Monitor defaults to unity so a user upgrading from a pre-Monitor config still
-// HEARS their clips locally.
+// normalize fills in safe defaults so callers never read a nil mixer level or nil
+// PerClip map. An UNSET (nil) Mic/Master/Monitor is seeded to unity (1.0) so a
+// fresh or pre-Monitor config still passes the mic through and HEARS clips; an
+// EXPLICIT level — including an explicit 0 the user dragged to mute — is preserved
+// verbatim so the mute round-trips instead of silently un-muting on the next
+// launch. A nil PerClip becomes an empty map. Applied after Load.
 func (s *Settings) normalize() {
 	if s.Hotkeys == nil {
 		s.Hotkeys = map[string]string{}
 	}
-	if s.Volumes.Mic == 0 {
-		s.Volumes.Mic = 1
+	if s.Volumes.Mic == nil {
+		s.Volumes.Mic = FloatPtr(1)
 	}
-	if s.Volumes.Master == 0 {
-		s.Volumes.Master = 1
+	if s.Volumes.Master == nil {
+		s.Volumes.Master = FloatPtr(1)
 	}
-	if s.Volumes.Monitor == 0 {
-		s.Volumes.Monitor = 1
+	if s.Volumes.Monitor == nil {
+		s.Volumes.Monitor = FloatPtr(1)
 	}
 	if s.Volumes.PerClip == nil {
 		s.Volumes.PerClip = map[string]float32{}

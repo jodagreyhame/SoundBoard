@@ -223,13 +223,15 @@ func main() {
 	app.Run()
 }
 
-// applyVolumes seeds the engine's mic/master/monitor gains from saved settings,
-// defaulting missing (zero) values to unity. The monitor seed matters most: at
-// unity the user HEARS clips on their local monitor by default.
+// applyVolumes seeds the engine's mic/master/monitor gains from saved settings.
+// Volumes was normalized on load, so an UNSET channel is already unity while an
+// EXPLICIT level (including a deliberate 0 mute) is preserved — the gain accessors
+// honour both. The monitor seed matters most: at unity the user HEARS clips on
+// their local monitor by default, but a saved 0 mute is now respected too.
 func applyVolumes(engine *audio.Engine, s *config.Settings) {
-	engine.SetMicGain(orUnity(s.Volumes.Mic))
-	engine.SetMasterGain(orUnity(s.Volumes.Master))
-	engine.SetMonitorGain(orUnity(s.Volumes.Monitor))
+	engine.SetMicGain(s.Volumes.MicGain())
+	engine.SetMasterGain(s.Volumes.MasterGain())
+	engine.SetMonitorGain(s.Volumes.MonitorGain())
 }
 
 // applyProcessing seeds the engine's mic-processing suite from saved settings so
@@ -253,14 +255,6 @@ func clipGain(s *config.Settings, id string) float32 {
 		}
 	}
 	return 1
-}
-
-// orUnity maps a zero (unset) gain to 1.0.
-func orUnity(g float32) float32 {
-	if g == 0 {
-		return 1
-	}
-	return g
 }
 
 // Compile-time checks that the wiring types satisfy the UI's interfaces, so a
@@ -395,12 +389,14 @@ type volController struct {
 
 func (v *volController) SetMic(g float32) {
 	v.engine.SetMicGain(g)
-	v.settings.Volumes.Mic = g
+	v.settings.Volumes.Mic = config.FloatPtr(g)
 }
 
 func (v *volController) SetMaster(g float32) {
 	v.engine.SetMasterGain(g)
-	v.settings.Volumes.Master = g
+	// Store an EXPLICIT pointer (not a bare 0 that omitempty would drop and normalize
+	// would un-mute): a deliberate 0 here mutes what Discord hears and must persist.
+	v.settings.Volumes.Master = config.FloatPtr(g)
 }
 
 // SetMonitor sets the local monitor level — the soundboard volume the USER hears
@@ -408,7 +404,7 @@ func (v *volController) SetMaster(g float32) {
 // the new level to the engine's monitor path and persists it.
 func (v *volController) SetMonitor(g float32) {
 	v.engine.SetMonitorGain(g)
-	v.settings.Volumes.Monitor = g
+	v.settings.Volumes.Monitor = config.FloatPtr(g)
 }
 
 func (v *volController) SetClip(id string, g float32) {
@@ -418,9 +414,9 @@ func (v *volController) SetClip(id string, g float32) {
 	v.settings.Volumes.PerClip[id] = g
 }
 
-func (v *volController) Mic() float32           { return orUnity(v.settings.Volumes.Mic) }
-func (v *volController) Master() float32        { return orUnity(v.settings.Volumes.Master) }
-func (v *volController) Monitor() float32       { return orUnity(v.settings.Volumes.Monitor) }
+func (v *volController) Mic() float32           { return v.settings.Volumes.MicGain() }
+func (v *volController) Master() float32        { return v.settings.Volumes.MasterGain() }
+func (v *volController) Monitor() float32       { return v.settings.Volumes.MonitorGain() }
 func (v *volController) Clip(id string) float32 { return clipGain(v.settings, id) }
 
 // setupController adapts internal/setup to ui.SetupController. It tracks not just

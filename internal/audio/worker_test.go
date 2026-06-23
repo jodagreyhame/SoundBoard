@@ -297,6 +297,142 @@ func TestDuplexUnderrunPassthrough(t *testing.T) {
 	}
 }
 
+// TestDuplexMuteSilencesOnFullUnderrun confirms mute is AUTHORITATIVE on the RT
+// thread: with MicMode "mute" and the output ring empty (the worker produced
+// nothing, the worst-case underrun), a loud live mic must NOT leak to the cable.
+// This is the regression for the "mute = silent must not depend on the worker" fix.
+func TestDuplexMuteSilencesOnFullUnderrun(t *testing.T) {
+	e := configuredEngine()
+	e.SetMicMode("mute")
+	// No worker running -> the output ring stays empty -> pure underrun.
+
+	micF := make([]float32, periodFrames*channels)
+	for i := range micF {
+		micF[i] = 0.3 // a clearly-audible live mic
+	}
+	mic := f32bytes(micF)
+	out := make([]byte, len(mic))
+	e.duplexCallback(out, mic, periodFrames)
+
+	for i, s := range bytesAsF32(out) {
+		if s != 0 {
+			t.Fatalf("mute must silence the cable even on underrun: sample %d = %v, want 0", i, s)
+		}
+	}
+}
+
+// TestDuplexPTTUpSilencesOnUnderrun confirms PTT mode with the key UP is treated as
+// force-closed on the RT thread, so the live mic does not leak on underrun either.
+func TestDuplexPTTUpSilencesOnUnderrun(t *testing.T) {
+	e := configuredEngine()
+	e.SetMicMode("ptt")
+	e.SetPTTDown(false) // key up -> gate force-closed
+
+	micF := make([]float32, periodFrames*channels)
+	for i := range micF {
+		micF[i] = 0.4
+	}
+	mic := f32bytes(micF)
+	out := make([]byte, len(mic))
+	e.duplexCallback(out, mic, periodFrames)
+
+	for i, s := range bytesAsF32(out) {
+		if s != 0 {
+			t.Fatalf("PTT-up must silence the cable on underrun: sample %d = %v, want 0", i, s)
+		}
+	}
+}
+
+// TestDuplexPartialUnderrunSeamIsContinuous confirms the partial-underrun splice is
+// cross-faded, not hard-cut: we pre-load the output ring with a small run of a
+// constant processed value (so got < frames), then assert the boundary between the
+// processed head and the passthrough tail has no large instantaneous jump. This is
+// the regression for the "audible splice/click on partial underrun" fix.
+func TestDuplexPartialUnderrunSeamIsContinuous(t *testing.T) {
+	e := configuredEngine()
+	e.SetMicMode("vad") // not force-closed: the tail is raw mic passthrough
+
+	// Pre-load the output ring with `got` processed samples at a level FAR from the
+	// raw mic, so a hard cut would produce a large step at the seam.
+	const got = 64
+	const processed float32 = -0.5
+	pre := make([]float32, got)
+	for i := range pre {
+		pre[i] = processed
+	}
+	if n := e.outRing.push(pre); n != got {
+		t.Fatalf("test setup: pushed %d processed samples, want %d", n, got)
+	}
+
+	const rawMic float32 = 0.5
+	micF := make([]float32, periodFrames*channels)
+	for i := range micF {
+		micF[i] = rawMic
+	}
+	mic := f32bytes(micF)
+	out := make([]byte, len(mic))
+	e.duplexCallback(out, mic, periodFrames)
+
+	// Inspect the per-frame mono level (both channels equal here) and find the
+	// largest sample-to-sample jump across the whole buffer. A hard cut would jump
+	// |processed - rawMic| = 1.0 at the seam; the cross-fade must keep every step
+	// well under that.
+	got32 := bytesAsF32(out)
+	var maxJump float32
+	for f := 1; f < periodFrames; f++ {
+		d := got32[f*channels] - got32[(f-1)*channels]
+		if d < 0 {
+			d = -d
+		}
+		if d > maxJump {
+			maxJump = d
+		}
+	}
+	// With a 16-frame ramp over a 1.0 span the per-step delta is ~1/16 ≈ 0.0625.
+	// Allow generous headroom but stay far below the hard-cut 1.0.
+	if maxJump > 0.2 {
+		t.Fatalf("partial-underrun seam jump = %v, want a smooth cross-fade (<=0.2, hard cut would be ~1.0)", maxJump)
+	}
+	// Sanity: the head really was the processed value and the tail really reached
+	// the raw mic (the fade completed), so we tested the actual splice.
+	if !approx(got32[0], processed) {
+		t.Fatalf("processed head not applied: out[0] = %v, want %v", got32[0], processed)
+	}
+	if !approx(got32[(periodFrames-1)*channels], rawMic) {
+		t.Fatalf("tail did not reach raw mic passthrough: last = %v, want %v", got32[(periodFrames-1)*channels], rawMic)
+	}
+}
+
+// TestDuplexMutePartialUnderrunTailIsSilent confirms that on a PARTIAL underrun in
+// mute mode the tail fades toward SILENCE (not raw mic), so even the cross-fade
+// region never leaks live voice and the tail ends fully silent.
+func TestDuplexMutePartialUnderrunTailIsSilent(t *testing.T) {
+	e := configuredEngine()
+	e.SetMicMode("mute")
+
+	const got = 32
+	pre := make([]float32, got) // processed head is silence (gate closed)
+	if n := e.outRing.push(pre); n != got {
+		t.Fatalf("test setup: pushed %d samples, want %d", n, got)
+	}
+
+	micF := make([]float32, periodFrames*channels)
+	for i := range micF {
+		micF[i] = 0.6 // loud live mic that must NOT leak
+	}
+	mic := f32bytes(micF)
+	out := make([]byte, len(mic))
+	e.duplexCallback(out, mic, periodFrames)
+
+	// The whole buffer must be silent: head is processed silence, tail fades from
+	// silence toward the silent (muted) target.
+	for i, s := range bytesAsF32(out) {
+		if s != 0 {
+			t.Fatalf("mute partial underrun must stay silent: sample %d = %v, want 0", i, s)
+		}
+	}
+}
+
 // TestDuplexDuckingReducesClips confirms ducking lowers the soundboard level while
 // the mic gate is open. We publish a high gate level, enable ducking, and check the
 // effective ducked master is below the raw master.

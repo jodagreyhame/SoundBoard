@@ -295,13 +295,28 @@ func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 	e.ctrlMu.Lock()
 	defer e.ctrlMu.Unlock()
 
-	// Tear down any previously configured duplex device first.
+	// Tear down any previously configured duplex device first. Uninit synchronously
+	// waits for the duplex callback to finish, so afterwards NO callback is pushing
+	// or pulling the rings.
 	if e.duplexDev != nil {
 		e.duplexDev.Uninit()
 		e.duplexDev = nil
 	}
 	freeCPtr(&e.micIDPtr)
 	freeCPtr(&e.cableIDPtr)
+
+	// Reconfigure path: a worker may still be running from a previous Start() if
+	// Configure is called without an intervening Stop(). It reads e.inRing/e.outRing
+	// dynamically, so if we reallocate the rings below while it lives, the old worker
+	// would start consuming the NEW ring AND the next Start() would launch a SECOND
+	// worker on the same rings — two consumers on one SPSC ring, which corrupts the
+	// read index and leaks the old goroutine. Stop it now (the device is already
+	// uninitialized, so the worker is not racing a live callback) BEFORE reallocating.
+	// 'started' is cleared so the device must be Start()ed again, which relaunches a
+	// single fresh worker on the new rings.
+	e.stopWorker()
+	e.started = false
+
 	// The Uninit above synchronously waits for the duplex callback to finish, so
 	// no callback owns e.cursors here. Drop the leftover cursors and drain the
 	// pending queue so a re-Configure starts from a clean cursor list instead of
@@ -428,6 +443,12 @@ func (e *Engine) Start() error {
 
 	if e.duplexDev == nil {
 		return errors.New("audio: not configured")
+	}
+	// Idempotent: a second Start() without an intervening Stop() must NOT relaunch
+	// the worker (that would put a second consumer on the SPSC rings and leak the
+	// first goroutine). The device is already running; nothing to do.
+	if e.started {
+		return nil
 	}
 	// Launch the mic-DSP worker BEFORE the device starts so the output ring is
 	// already being filled when the first callback fires (avoiding an initial burst

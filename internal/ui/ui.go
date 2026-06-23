@@ -199,6 +199,13 @@ type App struct {
 	// Mutating widgets, it must run on the Fyne thread (the ticker wraps it in
 	// fyne.Do). nil when no Audio panel is built.
 	gateUpdate func()
+
+	// onFixDone, when non-nil, is invoked at the very end of onFixRouting's
+	// background goroutine — after the setup op and the fyne.Do UI update have both
+	// run. It is nil in production (a no-op completion hook); tests set it so they
+	// can JOIN that goroutine before asserting, which keeps the goroutine's widget
+	// builds from leaking into and racing a later test under the inline test driver.
+	onFixDone func()
 }
 
 // New constructs the App with its dependencies. It does not build any Fyne

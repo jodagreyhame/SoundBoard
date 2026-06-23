@@ -1,9 +1,9 @@
 package ui
 
 import (
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
-	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -81,21 +81,24 @@ func (v *fakeVol) Clip(id string) float32 {
 	return 1
 }
 
-// fakeSetup is a controllable SetupController.
+// fakeSetup is a controllable SetupController. installCalls/engageCalls are atomic
+// because onFixRouting drives Install/Engage from a BACKGROUND goroutine while the
+// test goroutine reads the counts; an int would be a data race under -race even
+// though the logic is otherwise correct.
 type fakeSetup struct {
 	ready        bool
 	canEngage    bool
 	detail       string
 	installErr   error
 	engageErr    error
-	installCalls int
-	engageCalls  int
+	installCalls atomic.Int32
+	engageCalls  atomic.Int32
 }
 
 func (s *fakeSetup) Status() (bool, string) { return s.ready, s.detail }
 func (s *fakeSetup) CanEngage() bool        { return s.canEngage }
-func (s *fakeSetup) Install() error         { s.installCalls++; return s.installErr }
-func (s *fakeSetup) Engage() error          { s.engageCalls++; return s.engageErr }
+func (s *fakeSetup) Install() error         { s.installCalls.Add(1); return s.installErr }
+func (s *fakeSetup) Engage() error          { s.engageCalls.Add(1); return s.engageErr }
 
 // testLibrary builds a two-category library from an in-memory FS. catalog.New
 // only indexes paths (no decode), so empty files are fine.
@@ -258,15 +261,20 @@ func TestOnFixRoutingEngagesWhenCablePresent(t *testing.T) {
 	setup := &fakeSetup{ready: false, canEngage: true, detail: "cable present"}
 	a, _, _ := buildTestApp(t, setup)
 
+	// JOIN onFixRouting's background goroutine before asserting. Under the inline
+	// test driver, fyne.Do runs the banner/dialog rebuild ON that goroutine, so
+	// waiting for full completion (not just a counter) keeps its widget builds from
+	// racing the test goroutine — and from leaking into a later test's build.
+	done := make(chan struct{})
+	a.onFixDone = func() { close(done) }
 	a.onFixRouting()
-	// onFixRouting runs the op in a goroutine; wait briefly for it to record.
-	waitFor(t, func() bool { return setup.engageCalls > 0 || setup.installCalls > 0 })
+	<-done
 
-	if setup.engageCalls != 1 {
-		t.Fatalf("expected exactly 1 Engage call, got %d (install=%d)", setup.engageCalls, setup.installCalls)
+	if got := setup.engageCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 Engage call, got %d (install=%d)", got, setup.installCalls.Load())
 	}
-	if setup.installCalls != 0 {
-		t.Fatalf("Engage path must not call Install, got %d install calls", setup.installCalls)
+	if got := setup.installCalls.Load(); got != 0 {
+		t.Fatalf("Engage path must not call Install, got %d install calls", got)
 	}
 }
 
@@ -276,28 +284,17 @@ func TestOnFixRoutingInstallsWhenCableAbsent(t *testing.T) {
 	setup := &fakeSetup{ready: false, canEngage: false, detail: "cable absent"}
 	a, _, _ := buildTestApp(t, setup)
 
+	done := make(chan struct{})
+	a.onFixDone = func() { close(done) }
 	a.onFixRouting()
-	waitFor(t, func() bool { return setup.engageCalls > 0 || setup.installCalls > 0 })
+	<-done
 
-	if setup.installCalls != 1 {
-		t.Fatalf("expected exactly 1 Install call, got %d (engage=%d)", setup.installCalls, setup.engageCalls)
+	if got := setup.installCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 Install call, got %d (engage=%d)", got, setup.engageCalls.Load())
 	}
-	if setup.engageCalls != 0 {
-		t.Fatalf("Install path must not call Engage, got %d engage calls", setup.engageCalls)
+	if got := setup.engageCalls.Load(); got != 0 {
+		t.Fatalf("Install path must not call Engage, got %d engage calls", got)
 	}
-}
-
-// waitFor polls cond up to ~2s so the async onFixRouting goroutine can complete
-// without a fixed sleep.
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	for i := 0; i < 200; i++ {
-		if cond() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("condition not met within timeout")
 }
 
 // TestFavoritesSectionRendersOnlyWhenNonEmpty verifies the pinned favourites

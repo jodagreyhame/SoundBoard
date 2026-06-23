@@ -160,6 +160,13 @@ func (a *App) onFixRouting() {
 					a.refreshBanner()
 				}, a.win)
 		})
+		// Completion hook (nil in production). Fires AFTER the fyne.Do UI update so a
+		// test can join this goroutine — including its widget builds — before
+		// asserting, instead of polling a counter while the goroutine is still
+		// touching Fyne widgets. See App.onFixDone.
+		if a.onFixDone != nil {
+			a.onFixDone()
+		}
 	}()
 }
 

@@ -105,8 +105,24 @@ func (e *Engine) stopWorker() {
 // frame from the input ring; on success it runs the chain and pushes the result to
 // the output ring; otherwise it naps briefly and retries. It exits when stop is
 // closed.
+//
+// The idle nap reuses a SINGLE timer created once here rather than calling
+// time.After per iteration: time.After allocates a fresh *time.Timer and channel
+// on every call, and on an idle/silent mic this loop wakes every ~2ms, so that
+// per-iteration allocation is steady-state GC pressure exactly when the mic is
+// quiet (the common case). One Reset-able timer keeps the idle path allocation-free.
 func (w *micWorker) run() {
 	defer w.wg.Done()
+
+	// idle is reused across all idle iterations so the idle path never allocates a
+	// timer+channel. Created stopped: this module targets Go 1.23+, whose timer
+	// channels are UNBUFFERED and guarantee no stale value survives a Stop/Reset, so
+	// we must NOT use the old `if !Stop() { <-C }` drain idiom (it can deadlock).
+	// Stop() with no drain is the correct modern pattern.
+	idle := time.NewTimer(workerIdleSleep)
+	idle.Stop()
+	defer idle.Stop()
+
 	for {
 		select {
 		case <-w.stop:
@@ -117,10 +133,14 @@ func (w *micWorker) run() {
 		// Pull exactly one frame. The ring's pull is non-blocking; if a full frame
 		// is not yet available we nap and retry (bounded wait — never a hard spin).
 		if w.e.inRing.length() < dspFrame {
+			idle.Reset(workerIdleSleep)
 			select {
 			case <-w.stop:
+				// Go 1.23+ guarantees Stop() drops any pending fire with no stale send,
+				// so no channel drain is needed (draining would risk a deadlock).
+				idle.Stop()
 				return
-			case <-time.After(workerIdleSleep):
+			case <-idle.C:
 				continue
 			}
 		}
