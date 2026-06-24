@@ -12,6 +12,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -61,7 +63,27 @@ type App struct {
 	// once; stopEvents signals it to exit (closed by runCleanup).
 	eventsOnce sync.Once
 	stopEvents chan struct{}
+
+	// Debounced persistence. A slider drag fires dozens of SetVolume/
+	// SetGateSensitivity calls per second; each pushes to the engine immediately
+	// (RT-safe) but only MARKS settings dirty and arms a trailing timer instead of
+	// performing a full atomic config.Save() on the UI thread. The timer coalesces
+	// a whole drag into a SINGLE disk write on the trailing edge, mirroring the
+	// Fyne build's "applies instantly · saved on exit" model while still persisting
+	// promptly after the user stops moving the control. All three fields are
+	// guarded by lcMu. persistTimer is created/reset under the lock; persistDirty
+	// records that settings changed since the last successful flush. (The
+	// definitive save on quit still happens via Backend.close, and runCleanup
+	// flushes any pending write first so nothing is lost on a fast exit.)
+	persistTimer *time.Timer
+	persistDirty bool
 }
+
+// persistDebounce is the trailing-edge delay before a settings mutation is
+// written to disk. Long enough that a continuous slider drag (dozens of input
+// events/sec) collapses to one write, short enough that the change is durable
+// almost immediately after the user lets go.
+const persistDebounce = 400 * time.Millisecond
 
 // NewApp constructs the bound App. The backend is injected by main via
 // setBackend before wails.Run starts.
@@ -128,6 +150,19 @@ func (a *App) runCleanup() {
 		// Stop the events goroutine first so it never emits onto a torn-down
 		// runtime while the backend teardown runs.
 		close(a.stopEvents)
+
+		// Drain any pending debounced settings write BEFORE the backend tears down:
+		// stop the trailing timer so it can't fire mid-teardown, then flush so the
+		// latest in-memory settings hit disk. (Backend.close saves again, but a
+		// debounce window could otherwise leave the most recent slider value unsaved
+		// if a fast quit lands between the last 'input' and the timer.)
+		a.lcMu.Lock()
+		if a.persistTimer != nil {
+			a.persistTimer.Stop()
+		}
+		a.lcMu.Unlock()
+		a.flushPersist()
+
 		a.lcMu.Lock()
 		fn := a.cleanup
 		a.lcMu.Unlock()
@@ -592,17 +627,86 @@ func (a *App) Quit() {
 	})
 }
 
-// persist writes the current settings to disk. It takes lcMu so a concurrent
-// settings mutation (another bound method) cannot race the marshal. Called after
-// every setter that changed settings; a failure is surfaced to the diagnostics
-// log via the Wails logger.
+// Restart launches a FRESH instance of SoundBoard and then quits this one. It
+// is the in-window "Restart app" action offered after a successful VB-CABLE
+// install: the running process initialized its audio context BEFORE the cable
+// endpoints existed, so it cannot route to a cable that appeared mid-session
+// (newBackend enumerates devices and auto-engages routing only at startup). A
+// fresh process initializes a clean audio context that sees the just-added CABLE
+// Input/Output and auto-engages routing — an APP restart, NOT a Windows reboot.
+//
+// It mirrors the Fyne build's App.restart (internal/ui/ui.go) exactly: re-exec
+// os.Executable() in the current working directory, then exit via the single
+// Quit choke point so OnShutdown still runs the backend teardown (engine stop,
+// restore default mic, flush + save config) exactly once. If the new process
+// cannot be launched it falls back to just quitting, so the button is never a
+// dead end. (WASAPI capture is shared-mode, so the brief overlap while this
+// process tears down its engine and the new one bootstraps does not contend for
+// the devices — the same launch-then-quit ordering the Fyne build has shipped.)
+func (a *App) Restart() {
+	if exe, err := os.Executable(); err == nil {
+		cmd := exec.Command(exe)
+		if wd, werr := os.Getwd(); werr == nil {
+			cmd.Dir = wd
+		}
+		if err := cmd.Start(); err != nil {
+			if ctx := a.context(); ctx != nil {
+				runtime.LogErrorf(ctx, "restart: launch new instance: %v", err)
+			}
+		}
+	}
+	a.Quit()
+}
+
+// persist requests that the current settings be written to disk. It does NOT
+// write synchronously: it marks settings dirty and (re)arms a short trailing
+// timer, so a burst of setter calls — e.g. a continuous slider drag wiring the
+// 'input' event to SetVolume/SetGateSensitivity dozens of times a second —
+// coalesces into a SINGLE atomic config.Save() once the burst stops, instead of
+// performing tens of full json.MarshalIndent + temp-file write + rename cycles
+// on the UI thread. The in-memory settings were already mutated synchronously by
+// the caller (under lcMu) and the engine was already updated, so the change is
+// live instantly; only the disk write is deferred. Definitive persistence on
+// quit is still guaranteed by Backend.close (and runCleanup flushes any pending
+// write first), matching the Fyne build's "applies instantly · saved on exit".
 func (a *App) persist() {
 	b := a.getBackend()
 	if b == nil || b.settings == nil {
 		return
 	}
 	a.lcMu.Lock()
+	a.persistDirty = true
+	if a.persistTimer == nil {
+		a.persistTimer = time.AfterFunc(persistDebounce, a.flushPersist)
+	} else {
+		a.persistTimer.Reset(persistDebounce)
+	}
+	a.lcMu.Unlock()
+}
+
+// flushPersist writes the current settings to disk if they are dirty, clearing
+// the dirty flag on success. It is the single place that calls Settings.Save for
+// the debounced path: the trailing timer fires it after a burst of mutations,
+// and runCleanup calls it directly on shutdown so a pending write is never lost.
+// It takes lcMu so a concurrent settings mutation (another bound method) cannot
+// race the marshal; a failure is surfaced to the diagnostics log and leaves the
+// dirty flag set so the next flush (timer or shutdown) retries. Save is fast
+// enough that holding lcMu across it is acceptable here, and it matches the
+// original synchronous persist's locking discipline.
+func (a *App) flushPersist() {
+	b := a.getBackend()
+	if b == nil || b.settings == nil {
+		return
+	}
+	a.lcMu.Lock()
+	if !a.persistDirty {
+		a.lcMu.Unlock()
+		return
+	}
 	err := b.settings.Save()
+	if err == nil {
+		a.persistDirty = false
+	}
 	ctx := a.ctx
 	a.lcMu.Unlock()
 	if err != nil && ctx != nil {

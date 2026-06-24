@@ -653,6 +653,17 @@
   }
   function closeDialog() { S.dialog = null; renderDialog(); }
 
+  // restartApp re-launches SoundBoard via the bound App.Restart, which re-execs
+  // the binary and quits this process. The freshly installed VB-CABLE is only
+  // picked up by a new process (the running one initialized its audio context
+  // before the cable existed), so this is the one-click path to finish routing
+  // after an install. We close the dialog first for immediate feedback; the
+  // process exits a moment later when the backend teardown completes.
+  function restartApp() {
+    closeDialog();
+    call("Restart");
+  }
+
   function renderDialog() {
     var overlay = $("dialog-overlay");
     if (!S.dialog) { show(overlay, false); return; }
@@ -681,7 +692,7 @@
       body = "Installation complete. SoundBoard needs to restart to finish wiring the audio routing.";
       btns = [
         { label: "Later", kind: "secondary", on: closeDialog },
-        { label: "Restart app", kind: "primary", on: closeDialog }
+        { label: "Restart app", kind: "primary", on: restartApp }
       ];
     }
 
