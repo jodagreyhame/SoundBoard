@@ -1,0 +1,219 @@
+/* SoundBoard — Wails frontend theme foundation.
+ *
+ * The CSS custom-property tokens, fonts, gradients, and base styles are copied
+ * faithfully from the authoritative design comp
+ * (design/source/"SoundBoard App.dc.html"). The template DSL there is
+ * reimplemented as real vanilla JS in app.js; this file is the visual skin.
+ *
+ * Tokens live on .app (dark by default) with a .light override, exactly as in
+ * the design. Everything reads var(--token) so a single class flip reskins the
+ * whole window.
+ */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* Frameless window: the background is transparent so the rounded app shell
+   * (with its own radius + shadow) reads as a floating card. */
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Manrope', system-ui, -apple-system, sans-serif;
+}
+
+.app {
+  --bg: #0d0d0f;
+  --panel: #151518;
+  --panel2: #1a1a1f;
+  --elev: #212129;
+  --elev2: #2a2a33;
+  --line: #26262e;
+  --line2: #33333d;
+  --fg: #f2f2f6;
+  --dim: #9a9aa7;
+  --faint: #67677a;
+  --primary: #5865f2;
+  --primary2: #8b5cf6;
+  --on-primary: #ffffff;
+  --success: #3fbf6f;
+  --success-glow: #62ef93;
+  --warning: #f5a524;
+  --error: #f0484b;
+  --grad: linear-gradient(135deg, #5865f2, #8b5cf6);
+  --ok-bg: rgba(63, 191, 111, .13);
+  --warn-bg: rgba(245, 165, 36, .13);
+  --err-bg: rgba(240, 72, 75, .13);
+  --shadow: 0 24px 70px rgba(0, 0, 0, .5);
+  font-family: 'Manrope', system-ui, sans-serif;
+}
+
+.app.light {
+  --bg: #eceef2;
+  --panel: #ffffff;
+  --panel2: #f7f8fa;
+  --elev: #ffffff;
+  --elev2: #eef0f4;
+  --line: #e4e6ea;
+  --line2: #d4d7dd;
+  --fg: #15151b;
+  --dim: #5d5e69;
+  --faint: #9092a0;
+  --success: #1f9d57;
+  --success-glow: #1f9d57;
+  --warning: #c47d0a;
+  --error: #d83c3f;
+  --ok-bg: rgba(31, 157, 87, .10);
+  --warn-bg: rgba(196, 125, 10, .10);
+  --err-bg: rgba(216, 60, 63, .10);
+  --shadow: 0 24px 70px rgba(60, 70, 110, .18);
+}
+
+.mono { font-family: 'JetBrains Mono', monospace; }
+::selection { background: rgba(88, 101, 242, .35); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pop { 0% { transform: scale(.94); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+@keyframes pulseDot { 0%, 100% { opacity: .5; transform: scale(.9); } 50% { opacity: 1; transform: scale(1.1); } }
+@keyframes eq { 0%, 100% { height: 30%; } 50% { height: 100%; } }
+
+.scroll::-webkit-scrollbar { width: 11px; }
+.scroll::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 7px; border: 3px solid var(--panel); }
+.scroll::-webkit-scrollbar-track { background: transparent; }
+
+.rng { -webkit-appearance: none; appearance: none; height: 5px; border-radius: 4px; outline: none; cursor: pointer; }
+.rng:disabled { opacity: .4; cursor: default; }
+.rng::-webkit-slider-thumb { -webkit-appearance: none; width: 17px; height: 17px; border-radius: 50%; background: #fff; cursor: pointer; box-shadow: 0 1px 5px rgba(0, 0, 0, .4), 0 0 0 4px var(--primary); transition: transform .1s; }
+.rng::-webkit-slider-thumb:hover { transform: scale(1.12); }
+.rng:disabled::-webkit-slider-thumb { background: var(--faint); box-shadow: none; }
+
+.tile { transition: transform .12s cubic-bezier(.2, .8, .2, 1), border-color .12s, background .12s, box-shadow .12s; }
+.tile:hover { transform: translateY(-2px); border-color: var(--line2) !important; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); }
+.tile:active { transform: translateY(0) scale(.985); }
+.tile:hover .tplay { background: var(--grad) !important; color: #fff !important; }
+.star { transition: transform .12s, color .12s; }
+.star:hover { transform: scale(1.25); }
+.nav { transition: background .12s, color .12s; }
+.nav:hover { background: var(--elev) !important; }
+.jump:hover { background: var(--elev) !important; color: var(--fg) !important; }
+.ibtn { transition: background .12s, color .12s, filter .12s; }
+.ibtn:hover { filter: brightness(1.12); }
+.ghost:hover { background: var(--elev2) !important; color: var(--fg) !important; }
+.chiprow:hover .chipx { opacity: 1 !important; }
+
+/* App shell layout. The outer .app paints the radial-gradient backdrop; the
+ * .shell is the rounded, bordered window card carrying the titlebar + body. */
+.app {
+  min-height: 100vh;
+  background: radial-gradient(circle at 30% 0%, rgba(88, 101, 242, .10), transparent 60%), var(--bg);
+  color: var(--fg);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.shell {
+  flex: 1;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Titlebar — frameless-window drag region. The whole bar drags the OS window
+ * via the Wails draggable contract (--wails-draggable maps to
+ * -webkit-app-region on WebView2). Interactive children opt OUT with .no-drag. */
+.titlebar {
+  height: 46px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel2);
+  --wails-draggable: drag;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.titlebar .no-drag,
+.titlebar button {
+  --wails-draggable: no-drag;
+  -webkit-app-region: no-drag;
+}
+
+.brand-mark {
+  width: 26px; height: 26px; border-radius: 8px;
+  background: var(--grad);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 10px rgba(88, 101, 242, .5);
+}
+.brand-name { font-weight: 800; font-size: 14px; letter-spacing: -.2px; }
+.brand-badge { font-size: 10px; font-weight: 700; color: var(--faint); background: var(--elev); padding: 2px 7px; border-radius: 5px; }
+
+.ibtn {
+  display: flex; align-items: center; gap: 7px;
+  height: 30px; padding: 0 11px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--elev); color: var(--dim);
+  font-family: inherit; font-weight: 600; font-size: 12px; cursor: pointer;
+}
+.winbtn {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  border: none; background: transparent; color: var(--faint);
+  font-size: 14px; cursor: pointer; border-radius: 7px;
+}
+.winbtn:hover { background: var(--elev); color: var(--fg); }
+.winbtn.close:hover { background: var(--error); color: #fff; }
+
+.body { flex: 1; min-height: 0; display: flex; }
+
+/* Sidebar */
+.sidebar {
+  width: 236px; flex: none;
+  border-right: 1px solid var(--line);
+  background: var(--panel2);
+  display: flex; flex-direction: column;
+  padding: 14px 12px;
+}
+.nav {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  border: none; border-radius: 10px; padding: 11px 12px;
+  font-family: inherit; font-weight: 700; font-size: 13.5px;
+  cursor: pointer; text-align: left;
+  background: transparent; color: var(--dim);
+}
+.nav.active {
+  background: var(--grad); color: #fff;
+  box-shadow: 0 4px 14px rgba(88, 101, 242, .4);
+}
+.sidebar-section-label {
+  font-size: 9px; font-weight: 800; letter-spacing: .7px;
+  color: var(--faint); padding: 0 8px 8px;
+}
+.sidebar-footer {
+  flex: none; padding-top: 12px; border-top: 1px solid var(--line);
+  margin-top: 10px; display: flex; flex-direction: column; gap: 8px;
+}
+
+/* Main content column */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.placeholder {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 14px; color: var(--faint); text-align: center; padding: 40px;
+}
+.placeholder .ph-title { font-size: 16px; font-weight: 800; color: var(--dim); }
+.placeholder .ph-sub { font-size: 13px; max-width: 460px; line-height: 1.6; }
+.placeholder code {
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+  background: var(--elev); border: 1px solid var(--line);
+  border-radius: 6px; padding: 2px 6px; color: var(--primary);
+}

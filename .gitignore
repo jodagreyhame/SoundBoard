@@ -6,12 +6,21 @@ soundboard.exe
 vendor/
 
 # Build artifacts
-dist/
+/dist/
+# Wails compiled binaries (the source frontend/dist below is NOT a build artifact)
+build/bin/
+# The vanilla frontend lives in frontend/dist and is source — never ignore it.
+!frontend/dist/
+!frontend/dist/**
+
+# Wails packaging scratch (zipped distributables)
+soundboard.zip
 
 # Verification / proof screenshots (transient)
 _volpanel.png
 _favstop.png
 _audiopanel.png
+_wails_skeleton.png
 
 # OS
 Thumbs.db

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "SoundBoard",
+  "outputfilename": "soundboard",
+  "frontend:dir": "frontend",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "jodagreyhame"
+  },
+  "info": {
+    "companyName": "SoundBoard",
+    "productName": "SoundBoard",
+    "productVersion": "2.0.0",
+    "comments": "Windows 11 soundboard that mixes clips over your live mic via VB-CABLE."
+  }
+}

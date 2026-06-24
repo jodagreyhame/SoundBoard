@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoundBoard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Root shell. The theme class (dark default / light) and live state are
+       applied by app.js after App.GetState() resolves. Wails injects the bound
+       Go methods at window.go.main.App and the runtime at window.runtime. -->
+  <div id="app" class="app">
+    <div class="shell">
+
+      <!-- TITLEBAR (frameless drag region) -->
+      <div class="titlebar">
+        <div class="brand-mark">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="#fff" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 18V5l11-2v13" fill="none"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>
+          </svg>
+        </div>
+        <span class="brand-name">SoundBoard</span>
+        <span class="brand-badge">v2</span>
+
+        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+          <button id="theme-toggle" class="ibtn no-drag" type="button">
+            <span id="theme-icon">☾</span> <span id="theme-label">Dark</span>
+          </button>
+        </div>
+
+        <div style="display:flex;gap:4px;margin-left:8px;">
+          <button id="win-min" class="winbtn no-drag" type="button" title="Minimize">—</button>
+          <button id="win-tray" class="winbtn no-drag" type="button" title="Hide to tray">▢</button>
+          <button id="win-close" class="winbtn close no-drag" type="button" title="Hide to tray">✕</button>
+        </div>
+      </div>
+
+      <div class="body">
+
+        <!-- SIDEBAR -->
+        <div class="sidebar">
+          <div style="display:flex;flex-direction:column;gap:3px;">
+            <button id="nav-sound" class="nav active" type="button">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
+              Soundboard
+            </button>
+            <button id="nav-audio" class="nav" type="button">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
+              Mic &amp; Audio
+            </button>
+          </div>
+
+          <div class="scroll" style="margin-top:18px;flex:1;min-height:0;overflow-y:auto;">
+            <div class="sidebar-section-label">JUMP TO CATEGORY</div>
+            <div id="nav-categories"></div>
+          </div>
+
+          <!-- sidebar footer: routing status + tray/quit -->
+          <div class="sidebar-footer">
+            <div id="conn-pill" style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;background:var(--warn-bg);">
+              <span id="conn-dot" style="width:9px;height:9px;border-radius:50%;flex:none;background:var(--warning);"></span>
+              <span id="conn-label" style="font-size:11.5px;font-weight:700;color:var(--warning);">Routing needs setup</span>
+            </div>
+            <div style="display:flex;gap:6px;">
+              <div id="foot-tray" class="jump" style="flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:7px;border-radius:8px;cursor:pointer;color:var(--dim);font-size:11.5px;font-weight:600;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg> Tray
+              </div>
+              <div id="foot-quit" class="jump" style="flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:7px;border-radius:8px;cursor:pointer;color:var(--error);font-size:11.5px;font-weight:600;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg> Quit
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- MAIN content (skeleton: shell only; components land in phase 2) -->
+        <div class="main">
+          <div id="content" class="placeholder">
+            <div class="brand-mark" style="width:46px;height:46px;border-radius:14px;">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="#fff" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13" fill="none"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
+            </div>
+            <div class="ph-title" id="ph-title">SoundBoard — Wails shell</div>
+            <div class="ph-sub" id="ph-sub">Theme foundation + titlebar + sidebar are live. Soundboard grid, mixer dock, and the Audio panel land in phase 2, bound to the Go <code>App</code> methods.</div>
+            <div class="ph-sub mono" id="ph-state" style="font-size:11px;color:var(--faint);"></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

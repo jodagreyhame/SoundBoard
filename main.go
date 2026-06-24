@@ -1,6 +1,13 @@
+//go:build fyne
+
 // Command soundboard is a Windows 11 soundboard that mixes sound clips over
 // your live microphone via the VB-CABLE virtual audio cable, so anyone in
 // Discord (or any voice app) hears them as if you spoke.
+//
+// LEGACY ENTRYPOINT: this is the original Fyne v2 UI. It is preserved on disk
+// behind the `fyne` build tag during the migration to Wails v2 (the default
+// build). Build it explicitly with `go build -tags fyne`. The shipping/default
+// build now uses the Wails entrypoint in main_wails.go.
 //
 // v2 architecture:
 //   - UI is a Fyne main window with a clip browser and volume sliders, plus a
