@@ -21,10 +21,10 @@
 //     window hides to tray (OnBeforeClose); tray Open reshows it; tray Quit ends
 //     the process after the Wails shutdown cleanup.
 //
-// SKELETON phase: the App methods are stubbed (return zero/sample data) and the
-// real backend (internal/audio, internal/setup, internal/config, …) is not yet
-// wired. Phase 2 injects those dependencies WITHOUT changing any bound-method
-// signature.
+// The bound App methods are wired to the real backend (internal/audio,
+// internal/setup, internal/config, internal/catalog, internal/hotkeys) via the
+// Backend constructed in main and injected with app.setBackend, without changing
+// any bound-method signature from the original binding contract.
 package main
 
 import (
@@ -47,7 +47,22 @@ import (
 var assets embed.FS
 
 func main() {
+	// Route diagnostics to the per-user config-dir log file (the shipping
+	// -H=windowsgui build detaches stderr) and mirror to stderr for dev runs.
+	closeLog := initLogging()
+	defer closeLog()
+
 	app := NewApp()
+
+	// Bootstrap the REAL backend (engine, catalog, VB-CABLE routing, hotkeys,
+	// settings) synchronously BEFORE wails.Run — mirroring the Fyne main's
+	// startup ordering, where routing auto-engages and the mic is resolved before
+	// the UI loop runs. Injecting it now means GetState and the live-events loop
+	// see a fully wired backend from the first frame. setBackend also registers
+	// backend.close as the App's cleanup hook, so the OnShutdown choke point below
+	// performs the real engine.Stop / mic restore / config save.
+	backend := newBackend()
+	app.setBackend(backend)
 
 	// Launch the companion system tray on its own goroutine BEFORE wails.Run so
 	// the tray is up alongside the Wails main loop. The tray's Open/Quit actions
@@ -77,6 +92,14 @@ func main() {
 			Assets: assets,
 		},
 
+		// Bind the App so Wails injects its exported methods into the webview as
+		// window.go.main.App.<Method>. WITHOUT this the runtime never exposes the
+		// bound methods, every frontend call() resolves to null, and the UI silently
+		// falls back to its placeholder data — disconnected from the real backend.
+		// This is the line that connects the design frontend to the live engine/
+		// catalog/setup/config.
+		Bind: []interface{}{app},
+
 		// Match the design's dark, near-black backdrop behind the rounded shell.
 		BackgroundColour: &options.RGBA{R: 13, G: 13, B: 15, A: 1},
 
@@ -90,8 +113,14 @@ func main() {
 			return true
 		},
 		OnShutdown: func(ctx context.Context) {
-			// Phase 2 runs the real cleanup here (engine.Stop, restore default mic,
-			// save config). For now, tear the tray down so the goroutine exits.
+			// Single shutdown choke point. Every exit path (tray Quit, in-window
+			// Quit, OS-level close that escaped OnBeforeClose) unwinds through here.
+			// Run the backend teardown FIRST — engine.Stop, restore the default mic,
+			// save config — via the cleanup hook the backend registered with
+			// app.OnCleanup (Backend.close, guarded to run exactly once), THEN stop
+			// the tray goroutine so its message loop returns and the process can exit
+			// cleanly.
+			app.runCleanup()
 			stopTray()
 		},
 

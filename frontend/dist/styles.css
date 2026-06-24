@@ -1,13 +1,16 @@
-/* SoundBoard — Wails frontend theme foundation.
+/* SoundBoard — Wails frontend stylesheet.
  *
- * The CSS custom-property tokens, fonts, gradients, and base styles are copied
- * faithfully from the authoritative design comp
- * (design/source/"SoundBoard App.dc.html"). The template DSL there is
- * reimplemented as real vanilla JS in app.js; this file is the visual skin.
+ * Faithful reproduction of the authoritative design comp
+ * (design/source/"SoundBoard App.dc.html"). The comp expresses most styling as
+ * inline styles driven by a template DSL + support.js preview runtime; that
+ * runtime is NOT shipped. Here the visual skin is real CSS: the custom-property
+ * theme tokens (dark default + .light override), Manrope + JetBrains Mono fonts,
+ * the blurple→violet gradient, rounded cards, custom range sliders + scrollbars,
+ * the live-meter ring, EQ bars, hover/active states, and animations — all copied
+ * 1:1 from the comp. app.js converts the DSL into real state+render+event code.
  *
- * Tokens live on .app (dark by default) with a .light override, exactly as in
- * the design. Everything reads var(--token) so a single class flip reskins the
- * whole window.
+ * A single class flip on .app reskins the whole window (every rule reads
+ * var(--token)).
  */
 
 * { box-sizing: border-box; }
@@ -16,13 +19,16 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  /* Frameless window: the background is transparent so the rounded app shell
-   * (with its own radius + shadow) reads as a floating card. */
+  /* Frameless window: the page paints its own background (the design's radial
+   * blurple wash over the near-black backdrop). */
   background: transparent;
   overflow: hidden;
   font-family: 'Manrope', system-ui, -apple-system, sans-serif;
 }
 
+/* ---------------------------------------------------------------------------
+ * Theme tokens — copied verbatim from the design comp.
+ * ------------------------------------------------------------------------- */
 .app {
   --bg: #0d0d0f;
   --panel: #151518;
@@ -73,11 +79,17 @@ html, body {
 .mono { font-family: 'JetBrains Mono', monospace; }
 ::selection { background: rgba(88, 101, 242, .35); }
 
+/* ---------------------------------------------------------------------------
+ * Animations — copied verbatim from the comp.
+ * ------------------------------------------------------------------------- */
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pop { 0% { transform: scale(.94); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 @keyframes pulseDot { 0%, 100% { opacity: .5; transform: scale(.9); } 50% { opacity: 1; transform: scale(1.1); } }
 @keyframes eq { 0%, 100% { height: 30%; } 50% { height: 100%; } }
 
+/* ---------------------------------------------------------------------------
+ * Custom scrollbars + range sliders — verbatim from the comp.
+ * ------------------------------------------------------------------------- */
 .scroll::-webkit-scrollbar { width: 11px; }
 .scroll::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 7px; border: 3px solid var(--panel); }
 .scroll::-webkit-scrollbar-track { background: transparent; }
@@ -88,6 +100,9 @@ html, body {
 .rng::-webkit-slider-thumb:hover { transform: scale(1.12); }
 .rng:disabled::-webkit-slider-thumb { background: var(--faint); box-shadow: none; }
 
+/* ---------------------------------------------------------------------------
+ * Hover/active behaviours — verbatim from the comp.
+ * ------------------------------------------------------------------------- */
 .tile { transition: transform .12s cubic-bezier(.2, .8, .2, 1), border-color .12s, background .12s, box-shadow .12s; }
 .tile:hover { transform: translateY(-2px); border-color: var(--line2) !important; box-shadow: 0 8px 20px rgba(0, 0, 0, .28); }
 .tile:active { transform: translateY(0) scale(.985); }
@@ -102,15 +117,18 @@ html, body {
 .ghost:hover { background: var(--elev2) !important; color: var(--fg) !important; }
 .chiprow:hover .chipx { opacity: 1 !important; }
 
-/* App shell layout. The outer .app paints the radial-gradient backdrop; the
- * .shell is the rounded, bordered window card carrying the titlebar + body. */
+/* ---------------------------------------------------------------------------
+ * App shell layout. The outer .app paints the radial-gradient backdrop; the
+ * .shell is the rounded, bordered window card carrying titlebar + body.
+ * The comp centres a fixed 1160x760 card; in the frameless Wails window the
+ * shell fills the whole window and reflows when the user resizes it.
+ * ------------------------------------------------------------------------- */
 .app {
-  min-height: 100vh;
+  height: 100vh;
   background: radial-gradient(circle at 30% 0%, rgba(88, 101, 242, .10), transparent 60%), var(--bg);
   color: var(--fg);
   display: flex;
   flex-direction: column;
-  height: 100vh;
 }
 
 .shell {
@@ -125,8 +143,7 @@ html, body {
 }
 
 /* Titlebar — frameless-window drag region. The whole bar drags the OS window
- * via the Wails draggable contract (--wails-draggable maps to
- * -webkit-app-region on WebView2). Interactive children opt OUT with .no-drag. */
+ * via the Wails draggable contract; interactive children opt OUT with .no-drag. */
 .titlebar {
   height: 46px;
   flex: none;
@@ -151,6 +168,7 @@ html, body {
   background: var(--grad);
   display: flex; align-items: center; justify-content: center;
   box-shadow: 0 3px 10px rgba(88, 101, 242, .5);
+  flex: none;
 }
 .brand-name { font-weight: 800; font-size: 14px; letter-spacing: -.2px; }
 .brand-badge { font-size: 10px; font-weight: 700; color: var(--faint); background: var(--elev); padding: 2px 7px; border-radius: 5px; }
@@ -162,18 +180,33 @@ html, body {
   background: var(--elev); color: var(--dim);
   font-family: inherit; font-weight: 600; font-size: 12px; cursor: pointer;
 }
+.ibtn.icon-only { width: 30px; padding: 0; justify-content: center; font-size: 13px; }
+
 .winbtn {
   display: flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px;
+  width: 28px; height: 28px;
   border: none; background: transparent; color: var(--faint);
-  font-size: 14px; cursor: pointer; border-radius: 7px;
+  font-size: 13px; cursor: pointer; border-radius: 7px;
 }
 .winbtn:hover { background: var(--elev); color: var(--fg); }
 .winbtn.close:hover { background: var(--error); color: #fff; }
 
+/* Settings (⚙) demo popover anchored under the titlebar button. */
+.demo-pop {
+  position: absolute; top: 36px; right: 0; width: 230px;
+  background: var(--elev); border: 1px solid var(--line2); border-radius: 11px;
+  padding: 9px; z-index: 40; box-shadow: var(--shadow); animation: pop .14s ease;
+}
+.demo-pop .hdr { font-size: 9px; font-weight: 800; letter-spacing: .6px; color: var(--faint); padding: 4px 6px; }
+.demo-pop .sep { height: 1px; background: var(--line); margin: 6px 0; }
+.demo-pop .row { border-radius: 7px; padding: 7px 9px; font-size: 12px; font-weight: 600; color: var(--dim); cursor: pointer; }
+.demo-pop .row.active { color: var(--fg); background: var(--elev2); }
+
 .body { flex: 1; min-height: 0; display: flex; }
 
-/* Sidebar */
+/* ---------------------------------------------------------------------------
+ * Sidebar
+ * ------------------------------------------------------------------------- */
 .sidebar {
   width: 236px; flex: none;
   border-right: 1px solid var(--line);
@@ -196,24 +229,282 @@ html, body {
   font-size: 9px; font-weight: 800; letter-spacing: .7px;
   color: var(--faint); padding: 0 8px 8px;
 }
+.jump {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 8px; border-radius: 8px; cursor: pointer;
+  color: var(--dim); font-size: 12.5px; font-weight: 600;
+}
+.jump .chip { width: 8px; height: 8px; border-radius: 3px; flex: none; }
+.jump .jname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
+.jump .jcount { font-size: 10px; color: var(--faint); }
 .sidebar-footer {
   flex: none; padding-top: 12px; border-top: 1px solid var(--line);
   margin-top: 10px; display: flex; flex-direction: column; gap: 8px;
 }
-
-/* Main content column */
-.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-
-.placeholder {
-  flex: 1; min-height: 0;
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 14px; color: var(--faint); text-align: center; padding: 40px;
+.conn-pill { display: flex; align-items: center; gap: 9px; padding: 7px 8px; border-radius: 8px; }
+.conn-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.conn-label { font-size: 11.5px; font-weight: 700; }
+.foot-btn {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 7px; border-radius: 8px; cursor: pointer;
+  font-size: 11.5px; font-weight: 600;
 }
-.placeholder .ph-title { font-size: 16px; font-weight: 800; color: var(--dim); }
-.placeholder .ph-sub { font-size: 13px; max-width: 460px; line-height: 1.6; }
-.placeholder code {
-  font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
-  background: var(--elev); border: 1px solid var(--line);
-  border-radius: 6px; padding: 2px 6px; color: var(--primary);
+
+/* Mic-status block shown in the sidebar while the Audio view is active. */
+.mic-status { flex: 1; min-height: 0; margin-top: 18px; padding: 0 8px; }
+.mic-status .lbl { font-size: 9px; font-weight: 800; letter-spacing: .7px; color: var(--faint); margin-bottom: 10px; }
+.mic-status .live { display: flex; align-items: center; gap: 9px; font-size: 12.5px; font-weight: 600; color: var(--dim); }
+.mic-status .live-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--faint); }
+.mic-status .live-dot.open { background: var(--success-glow); box-shadow: 0 0 8px var(--success-glow); animation: pulseDot 1s infinite; }
+.mic-status .hint { margin-top: 10px; font-size: 11px; color: var(--faint); line-height: 1.5; }
+
+/* ---------------------------------------------------------------------------
+ * Main content column
+ * ------------------------------------------------------------------------- */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.hidden { display: none !important; }
+
+/* Setup banner (3 states). */
+.banner-wrap { flex: none; padding: 14px 18px 0; }
+.banner {
+  display: flex; align-items: center; gap: 12px;
+  border-radius: 12px; padding: 11px 15px; border: 1px solid;
+}
+.banner.engaged { background: var(--ok-bg); border-color: var(--success); }
+.banner.warn { background: var(--warn-bg); border-color: var(--warning); }
+.banner .b-check {
+  flex: none; width: 24px; height: 24px; border-radius: 50%;
+  background: var(--success); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 14px;
+}
+.banner .b-warn { flex: none; color: var(--warning); font-size: 19px; }
+.banner .b-text { flex: 1; font-size: 13px; font-weight: 600; }
+.banner.engaged .b-text { flex: 0 1 auto; }
+.banner .b-btn {
+  flex: none; display: flex; align-items: center; gap: 7px;
+  background: var(--warning); color: #1a1208; border: none; border-radius: 9px;
+  padding: 8px 15px; font-family: inherit; font-weight: 700; font-size: 12.5px; cursor: pointer;
+}
+
+/* Search row + Stop-all. */
+.search-row { flex: none; display: flex; gap: 10px; padding: 14px 18px; }
+.search-box {
+  flex: 1; display: flex; align-items: center; gap: 9px;
+  background: var(--elev); border: 1px solid var(--line); border-radius: 11px;
+  padding: 0 14px; height: 42px;
+}
+.search-box input {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--fg); font-family: inherit; font-size: 13.5px; height: 100%;
+}
+.search-box .clear { cursor: pointer; color: var(--faint); font-size: 15px; }
+.stop-btn {
+  display: flex; align-items: center; gap: 8px;
+  height: 42px; padding: 0 18px; border: none; border-radius: 11px;
+  background: var(--elev); color: var(--dim);
+  font-family: inherit; font-weight: 700; font-size: 13.5px; cursor: pointer;
+}
+.stop-btn.armed { background: var(--error); color: #fff; }
+
+/* Now-playing chips. */
+.nowplaying { flex: none; display: flex; align-items: center; gap: 9px; padding: 0 18px 12px; }
+.nowplaying .np-label { font-size: 10px; font-weight: 800; letter-spacing: .6px; color: var(--faint); flex: none; }
+.nowplaying .np-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.chiprow {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--ok-bg); border: 1px solid var(--success); border-radius: 20px;
+  padding: 5px 11px 5px 9px;
+}
+.chiprow .eq { display: flex; align-items: flex-end; gap: 2px; height: 13px; }
+.chiprow .eq span { width: 3px; background: var(--success-glow); border-radius: 2px; animation: eq .8s ease-in-out infinite; }
+.chiprow .eq span:nth-child(2) { animation-delay: .25s; }
+.chiprow .eq span:nth-child(3) { animation-delay: .5s; }
+.chiprow .np-name { font-size: 12px; font-weight: 600; color: var(--fg); }
+.chiprow .chipx { opacity: .5; cursor: pointer; color: var(--dim); font-size: 13px; transition: opacity .1s; }
+
+/* Clip scroll area + section headers. */
+.clip-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 0 18px 18px; }
+.no-results { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 90px 0; color: var(--faint); }
+.no-results span { font-size: 14px; }
+.sec-head { display: flex; align-items: center; gap: 9px; margin: 22px 0 11px; }
+.sec-head.fav { margin-top: 16px; }
+.sec-head .sec-chip { width: 11px; height: 11px; border-radius: 4px; }
+.sec-head .sec-star { color: var(--warning); font-size: 16px; }
+.sec-head .sec-name { font-weight: 800; font-size: 15px; text-transform: capitalize; }
+.sec-head .sec-name.fav { text-transform: none; }
+.sec-head .sec-count { color: var(--faint); font-weight: 700; font-size: 13px; }
+.sec-head .sec-rule { flex: 1; height: 1px; background: var(--line); margin-left: 4px; }
+.grid { display: flex; flex-wrap: wrap; gap: 10px; }
+
+/* Clip tile. */
+.tile {
+  position: relative; display: flex; align-items: center; gap: 10px;
+  width: 190px; height: 50px; padding: 0 12px 0 14px;
+  background: var(--elev); border: 1px solid var(--line); border-radius: 12px;
+  cursor: pointer; overflow: hidden;
+}
+.tile .accent { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; border-radius: 12px 0 0 12px; }
+.tile .tplay {
+  flex: none; width: 26px; height: 26px; border-radius: 8px;
+  background: var(--elev2); color: var(--primary);
+  display: flex; align-items: center; justify-content: center;
+  transition: background .12s, color .12s;
+}
+.tile .tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.tile .star { flex: none; font-size: 15px; cursor: pointer; }
+
+/* ---------------------------------------------------------------------------
+ * Mixer dock (bottom of soundboard view)
+ * ------------------------------------------------------------------------- */
+.mixer { flex: none; border-top: 1px solid var(--line); background: var(--panel2); padding: 12px 18px; }
+.mixer-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.mixer-head .m-title { font-weight: 700; font-size: 13px; }
+.mixer-head .m-sub { font-size: 11px; color: var(--faint); }
+.mixer-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1.1fr; gap: 18px; }
+.vol { min-width: 0; }
+.vol.disabled { opacity: .6; }
+.vol .v-head { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+.vol .v-icon { color: var(--primary); display: flex; }
+.vol .v-icon.off { color: var(--faint); }
+.vol .v-label { font-size: 11px; font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vol .v-label.muted { font-style: italic; color: var(--faint); }
+.vol .v-pct { font-size: 11px; color: var(--dim); }
+.vol .v-pct.hot { color: var(--warning); }
+.vol .v-pct.off { color: var(--faint); }
+.vol .rng { width: 100%; }
+
+/* ---------------------------------------------------------------------------
+ * Audio view
+ * ------------------------------------------------------------------------- */
+.audio-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 18px; }
+.audio-title { font-weight: 800; font-size: 19px; letter-spacing: -.3px; }
+.audio-sub { color: var(--dim); font-size: 13px; margin-bottom: 18px; }
+.audio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.card { background: var(--panel2); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+.card-title { font-weight: 700; font-size: 13px; margin-bottom: 12px; }
+.col { display: flex; flex-direction: column; gap: 16px; }
+
+/* Input-mode radio buttons. */
+.mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.mode {
+  display: flex; align-items: center; gap: 11px;
+  background: var(--elev); border: 1.5px solid var(--line); border-radius: 11px;
+  padding: 12px 13px; font-family: inherit; color: var(--fg); cursor: pointer; text-align: left;
+}
+.mode.on { background: var(--ok-bg); border-color: var(--primary); }
+.mode .m-dot { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--faint); background: transparent; }
+.mode.on .m-dot { border-color: var(--primary); background: var(--primary); box-shadow: inset 0 0 0 3px var(--elev); }
+.mode .m-txt { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+.mode .m-name { font-size: 13px; font-weight: 700; }
+.mode .m-sub { font-size: 10px; opacity: .7; font-weight: 500; }
+
+/* PTT key block (flagged needs-new-backend). */
+.ptt { margin-top: 13px; background: var(--elev); border: 1px solid var(--line); border-radius: 11px; padding: 12px 14px; }
+.ptt-row { display: flex; align-items: center; gap: 10px; }
+.ptt-row .lbl { font-size: 12px; font-weight: 700; }
+.ptt-row .key { font-size: 12px; background: var(--elev2); border: 1px solid var(--line2); border-radius: 7px; padding: 4px 10px; font-weight: 600; }
+.ptt-row .rec { font-size: 11px; font-weight: 700; background: var(--elev2); color: var(--dim); border: 1px solid var(--line2); border-radius: 7px; padding: 5px 11px; cursor: pointer; }
+.ptt .warn { font-size: 10.5px; color: var(--warning); margin-top: 8px; font-weight: 600; }
+
+/* Gate sensitivity. */
+.gate-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 13px; }
+.gate-head .g-title { font-weight: 700; font-size: 13px; }
+.gate-head .g-val { font-size: 13px; color: var(--primary); font-weight: 600; }
+.gate-ends { display: flex; justify-content: space-between; margin-top: 6px; font-size: 10px; color: var(--faint); }
+
+/* Live mic-meter ring. */
+.meter-card { display: flex; flex-direction: column; align-items: center; }
+.meter-head { align-self: flex-start; display: flex; align-items: center; gap: 8px; width: 100%; }
+.meter-head .mh-title { font-weight: 700; font-size: 13px; }
+.meter-head .mh-note { margin-left: auto; font-size: 9px; color: var(--faint); font-style: italic; }
+.ring-wrap { position: relative; width: 190px; height: 190px; margin: 20px 0 8px; }
+.ring { position: absolute; inset: 0; border-radius: 50%; transition: background .08s linear; }
+.ring-inner {
+  position: absolute; inset: 16px; border-radius: 50%; background: var(--panel2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+}
+.ring-inner .r-mic { color: var(--faint); transition: color .15s; }
+.ring-inner .r-mic.open { color: var(--success-glow); filter: drop-shadow(0 0 8px var(--success-glow)); }
+.ring-inner .r-state { font-size: 12px; font-weight: 700; color: var(--faint); }
+.ring-inner .r-state.open { color: var(--success-glow); }
+.meter-bar { width: 100%; height: 8px; border-radius: 5px; background: var(--elev); overflow: hidden; margin-top: 8px; }
+.meter-bar .fill { height: 100%; width: 0%; background: var(--primary); border-radius: 5px; transition: width .08s linear; }
+.meter-bar .fill.open { background: linear-gradient(90deg, var(--success), var(--success-glow)); }
+.meter-foot { font-size: 11px; color: var(--faint); margin-top: 10px; text-align: center; }
+.meter-foot b { color: var(--success-glow); }
+
+/* Processing toggles. */
+.full { grid-column: 1 / -1; }
+.proc-sub { font-size: 11.5px; color: var(--faint); font-style: italic; margin-bottom: 14px; line-height: 1.5; }
+.toggle-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.toggle {
+  display: flex; align-items: flex-start; gap: 12px;
+  background: var(--elev); border: 1.5px solid var(--line); border-radius: 11px;
+  padding: 13px; cursor: pointer; transition: border-color .12s;
+}
+.toggle.on { border-color: var(--primary); }
+.toggle .box {
+  flex: none; width: 21px; height: 21px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 800; color: #fff;
+  background: transparent; border: 2px solid var(--faint); margin-top: 1px;
+}
+.toggle.on .box { background: var(--primary); border-color: var(--primary); }
+.toggle .t-body { flex: 1; min-width: 0; }
+.toggle .t-name { font-size: 13px; font-weight: 600; }
+.toggle .t-desc { font-size: 10.5px; color: var(--faint); margin-top: 2px; line-height: 1.4; }
+
+/* Discord checklist. */
+.check-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+.check-head .ch-title { font-weight: 700; font-size: 13px; }
+.check-head .ch-badge { font-size: 9px; color: var(--primary); font-weight: 800; background: var(--ok-bg); padding: 3px 7px; border-radius: 5px; }
+.check-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.check-item {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--elev); border: 1px solid var(--line); border-radius: 9px;
+  padding: 9px 12px; font-size: 12px; color: var(--dim);
+}
+.check-item .tick {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--ok-bg); display: flex; align-items: center; justify-content: center;
+}
+
+/* ---------------------------------------------------------------------------
+ * Modal dialog (install / engage progress, success, error)
+ * ------------------------------------------------------------------------- */
+.dialog-overlay {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, .6);
+  backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50; animation: pop .15s ease;
+}
+.dialog { width: 360px; background: var(--elev); border: 1px solid var(--line2); border-radius: 16px; padding: 24px; box-shadow: var(--shadow); }
+.dialog .spinner { width: 38px; height: 38px; border-radius: 50%; border: 3px solid var(--line2); border-top-color: var(--primary); animation: spin .8s linear infinite; margin: 0 auto 16px; }
+.dialog .d-title { font-weight: 800; font-size: 16px; margin-bottom: 9px; }
+.dialog .d-title.err { color: var(--error); }
+.dialog .d-body { font-size: 13px; color: var(--dim); line-height: 1.55; margin-bottom: 20px; }
+.dialog .d-btns { display: flex; gap: 9px; justify-content: flex-end; }
+.dialog .d-btn { border: none; border-radius: 9px; padding: 9px 17px; font-family: inherit; font-weight: 700; font-size: 12.5px; cursor: pointer; }
+.dialog .d-btn.primary { background: var(--grad); color: #fff; }
+.dialog .d-btn.secondary { background: var(--elev2); color: var(--fg); }
+
+/* ---------------------------------------------------------------------------
+ * Narrow-window reflow. The comp targets 1160x760; below that the mixer/audio
+ * grids collapse to a single column and the sidebar narrows so the soundboard
+ * stays usable when the user resizes the frameless window down.
+ * ------------------------------------------------------------------------- */
+@media (max-width: 1040px) {
+  .mixer-grid { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 860px) {
+  .sidebar { width: 200px; }
+  .audio-grid { grid-template-columns: 1fr; }
+  .toggle-grid, .check-grid, .mode-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .mixer-grid { grid-template-columns: 1fr; }
+  .tile { width: 100%; }
+  .grid { flex-direction: column; }
 }

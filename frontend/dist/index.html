@@ -12,24 +12,40 @@
 <body>
   <!-- Root shell. The theme class (dark default / light) and live state are
        applied by app.js after App.GetState() resolves. Wails injects the bound
-       Go methods at window.go.main.App and the runtime at window.runtime. -->
+       Go methods at window.go.main.App and the runtime at window.runtime.
+
+       The markup is a faithful structural copy of the design comp
+       (design/source/"SoundBoard App.dc.html"): titlebar, sidebar, the
+       Soundboard view (banner / search / now-playing / clip grid / mixer dock)
+       and the Mic & Audio view (mode / gate / live ring meter / processing
+       toggles / Discord checklist), plus the modal dialog overlay. Dynamic lists
+       (categories, clips, mixer rows, modes, toggles) are populated by app.js. -->
   <div id="app" class="app">
     <div class="shell">
 
-      <!-- TITLEBAR (frameless drag region) -->
+      <!-- ============================ TITLEBAR ============================ -->
       <div class="titlebar">
         <div class="brand-mark">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="#fff" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 18V5l11-2v13" fill="none"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>
-          </svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="#fff"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
         </div>
         <span class="brand-name">SoundBoard</span>
         <span class="brand-badge">v2</span>
 
-        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;position:relative;">
           <button id="theme-toggle" class="ibtn no-drag" type="button">
             <span id="theme-icon">☾</span> <span id="theme-label">Dark</span>
           </button>
+          <button id="demo-toggle" class="ibtn icon-only no-drag" type="button" title="Setup state / dialogs (preview)">⚙</button>
+
+          <!-- Settings (⚙) popover: drive the routing-banner state + the dialogs
+               for demonstration/QA, mirroring the comp's preview menu. -->
+          <div id="demo-pop" class="demo-pop no-drag hidden">
+            <div class="hdr">SETUP STATE</div>
+            <div id="demo-banner"></div>
+            <div class="sep"></div>
+            <div class="hdr">DIALOGS</div>
+            <div id="demo-dialogs"></div>
+          </div>
         </div>
 
         <div style="display:flex;gap:4px;margin-left:8px;">
@@ -41,7 +57,7 @@
 
       <div class="body">
 
-        <!-- SIDEBAR -->
+        <!-- ============================ SIDEBAR ============================ -->
         <div class="sidebar">
           <div style="display:flex;flex-direction:column;gap:3px;">
             <button id="nav-sound" class="nav active" type="button">
@@ -54,41 +70,166 @@
             </button>
           </div>
 
-          <div class="scroll" style="margin-top:18px;flex:1;min-height:0;overflow-y:auto;">
+          <!-- Soundboard sidebar: jump-to-category nav + Favourites entry. -->
+          <div id="side-sound" class="scroll" style="margin-top:18px;flex:1;min-height:0;overflow-y:auto;">
             <div class="sidebar-section-label">JUMP TO CATEGORY</div>
-            <div id="nav-categories"></div>
+            <div id="nav-jumps"></div>
           </div>
 
-          <!-- sidebar footer: routing status + tray/quit -->
+          <!-- Audio sidebar: live mic status. -->
+          <div id="side-audio" class="mic-status hidden">
+            <div class="lbl">MIC STATUS</div>
+            <div class="live">
+              <span id="mic-live-dot" class="live-dot"></span>
+              <span id="mic-live-label">Mic closed</span>
+            </div>
+            <div id="mic-mode-hint" class="hint"></div>
+          </div>
+
+          <!-- Sidebar footer: routing pill + tray/quit. -->
           <div class="sidebar-footer">
-            <div id="conn-pill" style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;background:var(--warn-bg);">
-              <span id="conn-dot" style="width:9px;height:9px;border-radius:50%;flex:none;background:var(--warning);"></span>
-              <span id="conn-label" style="font-size:11.5px;font-weight:700;color:var(--warning);">Routing needs setup</span>
+            <div id="conn-pill" class="conn-pill" style="background:var(--warn-bg);">
+              <span id="conn-dot" class="conn-dot" style="background:var(--warning);"></span>
+              <span id="conn-label" class="conn-label" style="color:var(--warning);">Routing needs setup</span>
             </div>
             <div style="display:flex;gap:6px;">
-              <div id="foot-tray" class="jump" style="flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:7px;border-radius:8px;cursor:pointer;color:var(--dim);font-size:11.5px;font-weight:600;">
+              <div id="foot-tray" class="jump foot-btn" style="color:var(--dim);">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg> Tray
               </div>
-              <div id="foot-quit" class="jump" style="flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:7px;border-radius:8px;cursor:pointer;color:var(--error);font-size:11.5px;font-weight:600;">
+              <div id="foot-quit" class="jump foot-btn" style="color:var(--error);">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg> Quit
               </div>
             </div>
           </div>
         </div>
 
-        <!-- MAIN content (skeleton: shell only; components land in phase 2) -->
+        <!-- ============================= MAIN ============================= -->
         <div class="main">
-          <div id="content" class="placeholder">
-            <div class="brand-mark" style="width:46px;height:46px;border-radius:14px;">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="#fff" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l11-2v13" fill="none"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
-            </div>
-            <div class="ph-title" id="ph-title">SoundBoard — Wails shell</div>
-            <div class="ph-sub" id="ph-sub">Theme foundation + titlebar + sidebar are live. Soundboard grid, mixer dock, and the Audio panel land in phase 2, bound to the Go <code>App</code> methods.</div>
-            <div class="ph-sub mono" id="ph-state" style="font-size:11px;color:var(--faint);"></div>
-          </div>
-        </div>
 
+          <!-- -------------------- SOUNDBOARD VIEW -------------------- -->
+          <div id="view-sound" class="view">
+
+            <div class="banner-wrap"><div id="banner"></div></div>
+
+            <div class="search-row">
+              <div class="search-box">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+                <input id="search" type="text" placeholder="Search the clip library by name or category…" autocomplete="off" spellcheck="false">
+                <span id="search-clear" class="clear hidden">✕</span>
+              </div>
+              <button id="stop-all" class="stop-btn" type="button">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
+                <span id="stop-label">Stop</span>
+              </button>
+            </div>
+
+            <div id="nowplaying" class="nowplaying hidden">
+              <span class="np-label">NOW PLAYING</span>
+              <div id="np-chips" class="np-chips"></div>
+            </div>
+
+            <div id="clip-scroll" class="scroll clip-scroll">
+              <div id="no-results" class="no-results hidden">
+                <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+                <span>No clips match your search.</span>
+              </div>
+              <div id="sections"></div>
+            </div>
+
+            <!-- MIXER DOCK -->
+            <div class="mixer">
+              <div class="mixer-head">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--dim)" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>
+                <span class="m-title">Mixer</span>
+                <span class="m-sub">applies instantly · saved on exit · only “others hear” reaches Discord</span>
+              </div>
+              <div id="mixer-grid" class="mixer-grid"></div>
+            </div>
+          </div>
+
+          <!-- -------------------- MIC &amp; AUDIO VIEW -------------------- -->
+          <div id="view-audio" class="view scroll audio-scroll hidden">
+            <div class="audio-title">Mic &amp; Audio</div>
+            <div class="audio-sub">Cleans your voice before it reaches Discord. Clips are never processed.</div>
+
+            <div class="audio-grid">
+
+              <!-- LEFT: input mode + gate -->
+              <div class="col">
+                <div class="card">
+                  <div class="card-title">Input mode</div>
+                  <div id="mode-grid" class="mode-grid"></div>
+                  <div id="ptt-block" class="ptt hidden">
+                    <div class="ptt-row">
+                      <span class="lbl">PTT key</span>
+                      <span class="mono key">Ctrl + `</span>
+                      <button class="ghost rec" type="button">Record combo…</button>
+                    </div>
+                    <div class="warn">⚠ Applies after restart · live re-bind needs new backend</div>
+                  </div>
+                </div>
+
+                <div class="card">
+                  <div class="gate-head">
+                    <span class="g-title">Gate sensitivity</span>
+                    <span id="gate-val" class="mono g-val">15%</span>
+                  </div>
+                  <input id="gate" type="range" class="rng" min="0" max="100" step="1" value="15" style="width:100%;">
+                  <div class="gate-ends"><span>opens easily</span><span>needs louder voice</span></div>
+                </div>
+              </div>
+
+              <!-- RIGHT: live mic meter ring -->
+              <div class="card meter-card">
+                <div class="meter-head">
+                  <span class="mh-title">Live mic meter</span>
+                  <span class="mh-note">custom widget · ~20 Hz</span>
+                </div>
+                <div class="ring-wrap">
+                  <div id="ring" class="ring" style="background:conic-gradient(from -90deg, var(--primary) 0deg, var(--elev) 0deg);"></div>
+                  <div class="ring-inner">
+                    <span id="ring-mic" class="r-mic">
+                      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>
+                    </span>
+                    <span id="ring-state" class="r-state">closed</span>
+                  </div>
+                </div>
+                <div class="meter-bar"><div id="meter-fill" class="fill"></div></div>
+                <div class="meter-foot">Speak — the ring fills <b>green</b> when the gate opens.</div>
+              </div>
+
+              <!-- Processing toggles (full width) -->
+              <div class="card full">
+                <div class="card-title" style="margin-bottom:4px;">Processing</div>
+                <div class="proc-sub">Clean, gated, leveled voice — applied to your mic only, before Discord. Leave Discord’s own noise suppression OFF.</div>
+                <div id="toggle-grid" class="toggle-grid"></div>
+              </div>
+
+              <!-- Discord checklist (full width) -->
+              <div class="card full">
+                <div class="check-head">
+                  <span class="ch-title">Discord settings checklist</span>
+                  <span class="ch-badge">NEW SURFACE</span>
+                </div>
+                <div id="check-grid" class="check-grid"></div>
+              </div>
+
+            </div>
+          </div>
+
+        </div>
       </div>
+
+      <!-- ============================ DIALOG ============================ -->
+      <div id="dialog-overlay" class="dialog-overlay hidden">
+        <div class="dialog">
+          <div id="dialog-spinner" class="spinner hidden"></div>
+          <div id="dialog-title" class="d-title"></div>
+          <div id="dialog-body" class="d-body"></div>
+          <div id="dialog-btns" class="d-btns"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 

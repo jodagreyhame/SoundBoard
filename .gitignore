@@ -16,11 +16,9 @@ build/bin/
 # Wails packaging scratch (zipped distributables)
 soundboard.zip
 
-# Verification / proof screenshots (transient)
-_volpanel.png
-_favstop.png
-_audiopanel.png
-_wails_skeleton.png
+# Verification / proof screenshots (transient). All proof shots use the _name.png
+# convention (the design's authoritative comps live under design/, not here).
+_*.png
 
 # OS
 Thumbs.db

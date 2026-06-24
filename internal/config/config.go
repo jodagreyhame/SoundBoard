@@ -25,6 +25,13 @@ type Settings struct {
 	Monitor     bool              `json:"monitor"`
 	Hotkeys     map[string]string `json:"hotkeys"`
 
+	// Theme is the persisted UI theme for the Wails front end, one of "dark" |
+	// "light". Empty means "unset" — the UI defaults an empty value to dark itself,
+	// so normalize() deliberately does NOT coerce it (keeping a fresh config's
+	// round-trip byte-identical and the existing config tests passing). Omitted
+	// from JSON when empty.
+	Theme string `json:"theme,omitempty"`
+
 	// Volumes holds the in-app mixer levels (all managed inside SoundBoard;
 	// nothing in Discord is changed by the user). Omitted when empty so an
 	// upgraded config without volumes round-trips to its prior shape.

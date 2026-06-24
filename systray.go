@@ -68,13 +68,17 @@ func onTrayReady(app *App) {
 	}()
 }
 
-// showFromTray shows and focuses the window. It is the tray "Open" action;
-// it no-ops safely until the Wails context exists (app.ctx set in startup).
+// showFromTray shows and focuses the window. It is the tray "Open" action and
+// runs on the systray goroutine, so it reads ctx through the mutex-guarded
+// getter; it no-ops safely until the Wails context exists (set in startup).
 func (a *App) showFromTray() {
-	if a.ctx == nil {
+	ctx := a.context()
+	if ctx == nil {
 		return
 	}
-	wailsruntime.WindowShow(a.ctx)
-	// Unminimise in case it was minimised rather than hidden.
-	wailsruntime.WindowUnminimise(a.ctx)
+	// Unminimise first (in case it was minimised rather than hidden), then show
+	// and raise so the window comes to the foreground regardless of which state
+	// the close/minimise/hide path left it in.
+	wailsruntime.WindowUnminimise(ctx)
+	wailsruntime.WindowShow(ctx)
 }

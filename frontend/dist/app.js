@@ -1,38 +1,70 @@
-/* SoundBoard — Wails frontend bootstrap (skeleton phase).
+/* SoundBoard — Wails frontend application.
  *
- * The authoritative design comp (design/source/"SoundBoard App.dc.html") uses
- * a template DSL ({{ }}, <sc-if>, <sc-for>, support.js runtime). That runtime is
- * a preview-only tool and is NOT shipped. This file reimplements the parts the
- * skeleton needs as plain state + render + event code:
- *   - read the full snapshot from App.GetState()
- *   - apply the theme class, render the sidebar category list + routing pill
- *   - wire the titlebar/footer buttons to the bound Go methods
- *   - subscribe to the Go->JS events (gateLevel / routingStatus / installProgress)
+ * The authoritative design comp (design/source/"SoundBoard App.dc.html")
+ * expresses the UI as a template DSL ({{ }}, <sc-if>, <sc-for>, onClick="{{ }}")
+ * driven by support.js — a preview-only runtime that is NOT shipped. This file
+ * reimplements the entire comp as real vanilla state + render + event code,
+ * wired to the Wails-bound Go App.
  *
- * The soundboard grid, mixer dock, and Audio panel are intentionally left as a
- * placeholder; they are built in phase 2 on top of this same binding contract.
+ * Architecture:
+ *   - boot(): read the full snapshot from App.GetState(), hydrate `state`,
+ *     render every view, wire every control to a bound method, subscribe to the
+ *     three Go->JS events.
+ *   - Bindings (window.go.main.App.<Method>) return Promises; every call is
+ *     guarded so the page still renders (with the snapshot's data) if opened
+ *     outside the Wails runtime.
+ *   - Events (window.runtime.EventsOn): gateLevel -> animate the ring meter;
+ *     routingStatus -> update the banner + sidebar pill; installProgress ->
+ *     drive the install/engage dialog.
  *
- * Binding contract (Wails injects these):
- *   window.go.main.App.<Method>  -> the bound Go methods (return Promises)
- *   window.runtime.EventsOn/Emit -> the live event bus
+ * Data model (the binding contract, app.go State): theme, routing{state,detail,
+ * canEngage}, categories[{name,count}], clips[{id,name,category,favorite}],
+ * favorites[]string, volumes{mic,master,monitor}, perClip{id:float},
+ * audio{micMode,gateSensitivity,noiseSuppression,agc,ducking,forceThrough}.
+ *
+ * The grid renders state.clips grouped by category. The wired backend's
+ * GetState() returns the REAL catalog (the clip library across 12 categories), so the
+ * grid is driven entirely by live data. app.js keeps a placeholder synthesizer
+ * (synthClips) as a pure DEFENSIVE fallback for the degraded case where the
+ * snapshot carries categories+counts but no clips[] (e.g. opened outside Wails,
+ * or a catalog-walk failure leaves an empty library); whenever clips[] is
+ * populated — the normal path — the synthesizer is bypassed entirely.
  */
 
 (function () {
   "use strict";
 
-  // --- bound-method access -------------------------------------------------
-  // Wails exposes bindings at window.go.main.App. Guard each call so the page
-  // still renders (with sample data) if opened outside the Wails runtime.
+  // --- bound-method / runtime access ---------------------------------------
   function App() {
     return (window.go && window.go.main && window.go.main.App) || null;
   }
-  function runtime() {
-    return window.runtime || null;
+  function rt() { return window.runtime || null; }
+
+  // Call a bound method by name with args; swallow absence/rejection so the UI
+  // never breaks when previewed outside Wails. Returns the Promise (or null).
+  function call(name, ...args) {
+    var a = App();
+    if (a && typeof a[name] === "function") {
+      try { return Promise.resolve(a[name].apply(a, args)); }
+      catch (e) { return null; }
+    }
+    return null;
   }
 
-  // A safe fallback snapshot so the shell renders even before/without the Go
-  // backend (e.g. previewed in a plain browser). Mirrors GetState()'s shape.
-  var FALLBACK_STATE = {
+  // --- category chip colours (verbatim from the comp CATS) ------------------
+  var CHIP = {};
+  function chipFor(name) { return CHIP[name] || "#5865f2"; }
+
+  // The comp's per-category word lists — used ONLY to synthesize readable
+  // placeholder clip names in the skeleton build (when GetState returns no
+  // clips). Real clips from the backend always take precedence.
+  var WORDS = {};
+
+  function pretty(s) { return String(s || "").replace(/[-_]/g, " ").trim(); }
+  function capWords(s) { return pretty(s).replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
+
+  // --- live UI state (not all of it is persisted server-side) --------------
+  var FALLBACK = {
     theme: "dark",
     routing: { state: "absent", detail: "VB-CABLE not detected — install it to route audio into Discord.", canEngage: false },
     categories: [
@@ -41,172 +73,830 @@
       { name: "game-clips", count: 9 }, { name: "scifi", count: 28 }, { name: "game-clips", count: 6 },
       { name: "films", count: 35 }, { name: "tv", count: 12 }, { name: "wow", count: 13 }
     ],
-    clips: [],
-    favorites: [],
-    volumes: { mic: 1, master: 1, monitor: 1 },
-    perClip: {},
-    audio: {
-      micMode: "vad", gateSensitivity: 0.15, noiseSuppression: false,
-      agc: false, ducking: false, forceThrough: false
+    clips: [], favorites: [],
+    volumes: { mic: 1, master: 1, monitor: 1 }, perClip: {},
+    audio: { micMode: "vad", gateSensitivity: 0.15, noiseSuppression: false, agc: false, ducking: false, forceThrough: false }
+  };
+
+  var S = {
+    snap: FALLBACK,           // last server snapshot
+    view: "sound",            // 'sound' | 'audio'
+    theme: "dark",
+    search: "",
+    favorites: [],            // []clipID
+    clips: [],                // normalized [{id,name,category,favorite}]
+    cats: [],                 // [{name,count}]
+    playing: [],              // [{id,name,chip}] now-playing chips (client-side)
+    selected: null,           // selected clipID (per-clip mixer row)
+    vol: { mic: 100, master: 100, monitor: 100 }, // percent (0..150)
+    clipGain: 100,
+    micMode: "vad",
+    gateSens: 15,             // percent 0..100
+    gateLevel: 0,             // 0..1 from the gateLevel event
+    toggles: { noise: false, agc: false, duck: false, force: false },
+    demoOpen: false,
+    dialog: null              // dialog key or null
+  };
+
+  // ---------------------------------------------------------------------------
+  // Snapshot ingest. Normalizes the server State into S, synthesizing placeholder
+  // clips when the snapshot has none (skeleton build).
+  // ---------------------------------------------------------------------------
+  function ingest(snap) {
+    S.snap = snap || FALLBACK;
+    var sn = S.snap;
+    S.theme = sn.theme === "light" ? "light" : "dark";
+    S.cats = (sn.categories || []).slice();
+    S.favorites = (sn.favorites || []).slice();
+
+    // Volumes arrive as linear gains (1.0 = unity); the UI works in percent.
+    var v = sn.volumes || {};
+    S.vol = { mic: pct(v.mic), master: pct(v.master), monitor: pct(v.monitor) };
+
+    var au = sn.audio || {};
+    S.micMode = au.micMode || "vad";
+    S.gateSens = Math.round((au.gateSensitivity != null ? au.gateSensitivity : 0.15) * 100);
+    S.toggles = {
+      noise: !!au.noiseSuppression, agc: !!au.agc,
+      duck: !!au.ducking, force: !!au.forceThrough
+    };
+
+    // Clips: prefer the real catalog (the normal wired path); only synthesize
+    // from category counts as a defensive fallback when the snapshot carries no
+    // clips[] (degraded/preview path).
+    var clips = (sn.clips || []).map(function (c) {
+      return { id: c.id, name: c.name || capWords(c.id.split("/").pop()), category: c.category || c.id.split("/")[0], favorite: !!c.favorite };
+    });
+    if (!clips.length && S.cats.length) clips = synthClips(S.cats);
+    // Reflect favorites onto clips.
+    var favSet = {}; S.favorites.forEach(function (id) { favSet[id] = true; });
+    clips.forEach(function (c) { c.favorite = !!favSet[c.id]; });
+    S.clips = clips;
+
+    // perClip gains (linear -> percent) for the currently selected clip.
+    S._perClip = {};
+    var pc = sn.perClip || {};
+    Object.keys(pc).forEach(function (id) { S._perClip[id] = pct(pc[id]); });
+  }
+
+  function pct(gain) {
+    if (gain == null) return 100;
+    return Math.round(gain * 100);
+  }
+
+  // Build readable placeholder clips for the skeleton build.
+  function synthClips(cats) {
+    var out = [];
+    cats.forEach(function (c) {
+      var words = WORDS[c.name] || [pretty(c.name)];
+      for (var i = 0; i < c.count; i++) {
+        var base = words[i % words.length];
+        var label = i < words.length ? base : base + " " + (Math.floor(i / words.length) + 1);
+        out.push({ id: c.name + "/" + i, name: capWords(label), category: c.name, favorite: false });
+      }
+    });
+    // A small default favourites set so the pinned section demonstrates (only
+    // when the server provided none and we're in the synthesized skeleton path).
+    if (!S.favorites.length) {
+      var byId = {}; out.forEach(function (c) { byId[c.id] = true; });
+      ["games/3", "movies/1", "films/5", "reactions/2", "wow/0"].forEach(function (id) {
+        if (byId[id]) S.favorites.push(id);
+      });
     }
-  };
-
-  // Category chip colours, keyed by category name. Matches the design comp's
-  // CATS chips so the sidebar dots read identically. Unknown categories fall
-  // back to the primary accent.
-  var CHIP = {
-    game-clips: "#e0564b", games: "#5865f2", memes: "#f5a524", movies: "#b06bf0",
-    game-clips: "#1bbf9c", reactions: "#3aa0f0", game-clips: "#43c46b", scifi: "#22d3c0",
-    game-clips: "#94a3b3", "films": "#f1c40f", tv: "#ee5a6f", wow: "#2f8fd6"
-  };
-  function chipFor(name) { return CHIP[name] || "var(--primary)"; }
-
-  // Prettify a category key into a display label (dashes/underscores -> spaces,
-  // first letter capitalised) — the same rule the backend/catalog uses.
-  function prettyCategory(name) {
-    var s = String(name || "").replace(/[-_]/g, " ").trim();
-    return s.charAt(0).toUpperCase() + s.slice(1);
+    return out;
   }
 
-  var state = FALLBACK_STATE;
-
-  // --- render --------------------------------------------------------------
-  function applyTheme(theme) {
-    var root = document.getElementById("app");
-    if (theme === "light") root.classList.add("light");
-    else root.classList.remove("light");
-    document.getElementById("theme-icon").textContent = theme === "dark" ? "☾" : "☀";
-    document.getElementById("theme-label").textContent = theme === "dark" ? "Dark" : "Light";
+  function clipById(id) {
+    for (var i = 0; i < S.clips.length; i++) if (S.clips[i].id === id) return S.clips[i];
+    return null;
   }
 
-  function renderCategories(categories) {
-    var host = document.getElementById("nav-categories");
+  // ---------------------------------------------------------------------------
+  // Small DOM helpers.
+  // ---------------------------------------------------------------------------
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, html) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (html != null) e.innerHTML = html;
+    return e;
+  }
+  function show(node, on) { node.classList.toggle("hidden", !on); }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  var PLAY_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+
+  // trackFill: the comp's two-tone range track (filled blurple to the thumb).
+  function trackFill(val, max) {
+    var p = Math.round((val / max) * 100);
+    return "linear-gradient(90deg,var(--primary) " + p + "%,var(--elev) " + p + "%)";
+  }
+
+  // ===========================================================================
+  // THEME
+  // ===========================================================================
+  function applyTheme() {
+    var root = $("app");
+    root.classList.toggle("light", S.theme === "light");
+    $("theme-icon").textContent = S.theme === "dark" ? "☾" : "☀";
+    $("theme-label").textContent = S.theme === "dark" ? "Dark" : "Light";
+  }
+
+  // ===========================================================================
+  // SIDEBAR
+  // ===========================================================================
+  function renderSidebar() {
+    show($("side-sound"), S.view === "sound");
+    show($("side-audio"), S.view === "audio");
+
+    if (S.view === "sound") {
+      var host = $("nav-jumps");
+      host.innerHTML = "";
+      var secs = visibleSections();
+
+      // Favourites jump (only when there are matching favourites).
+      var favCount = visibleFavClips().length;
+      if (favCount) {
+        var f = el("div", "jump");
+        f.innerHTML =
+          '<span class="star" style="color:var(--warning);font-size:13px;">★</span>' +
+          '<span class="jname" style="text-transform:none;">Favourites</span>' +
+          '<span class="mono jcount">' + favCount + "</span>";
+        f.addEventListener("click", function () { jumpTo("sec-fav"); });
+        host.appendChild(f);
+      }
+
+      secs.forEach(function (s) {
+        var row = el("div", "jump");
+        row.innerHTML =
+          '<span class="chip" style="background:' + chipFor(s.name) + ';"></span>' +
+          '<span class="jname">' + esc(capWords(s.name)) + "</span>" +
+          '<span class="mono jcount">' + s.clips.length + "</span>";
+        row.addEventListener("click", function () { jumpTo("sec-" + s.name); });
+        host.appendChild(row);
+      });
+    } else {
+      // Audio sidebar: live mic status.
+      var open = S.gateLevel > 0.5;
+      $("mic-live-dot").classList.toggle("open", open);
+      $("mic-live-label").textContent = open ? "Mic open" : "Mic closed";
+      $("mic-mode-hint").textContent = modeHint(S.micMode);
+    }
+  }
+
+  function jumpTo(secId) {
+    var scroll = $("clip-scroll");
+    var node = $(secId);
+    if (node && scroll) scroll.scrollTop = node.offsetTop - 6;
+  }
+
+  // ===========================================================================
+  // ROUTING BANNER + sidebar pill (3 states)
+  // ===========================================================================
+  // routing.state: "absent" (not detected) | "present" (detected, not engaged)
+  //              | "engaged" (active).
+  function renderBanner() {
+    var r = S.snap.routing || {};
+    var b = $("banner");
+    b.innerHTML = "";
+    if (r.state === "engaged") {
+      b.className = "banner engaged";
+      b.innerHTML =
+        '<span class="b-check">✓</span>' +
+        '<span class="b-text">' + esc(r.detail || "Audio routing active — Discord hears the soundboard. No Discord changes needed.") + "</span>";
+    } else {
+      b.className = "banner warn";
+      var present = r.state === "present";
+      var text = r.detail || (present
+        ? "VB-CABLE detected — engage it so Discord can hear the board."
+        : "VB-CABLE not detected — install it to route audio into Discord.");
+      var label = present ? "Engage routing" : "Install / Fix audio routing";
+      b.innerHTML =
+        '<span class="b-warn">⚠</span>' +
+        '<span class="b-text">' + esc(text) + "</span>" +
+        '<button class="ibtn b-btn" type="button">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1a1208" stroke-width="2.3" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>' +
+        esc(label) + "</button>";
+      b.querySelector(".b-btn").addEventListener("click", onInstallRouting);
+    }
+
+    // Sidebar pill.
+    var engaged = r.state === "engaged";
+    var pill = $("conn-pill"), dot = $("conn-dot"), lab = $("conn-label");
+    pill.style.background = engaged ? "var(--ok-bg)" : "var(--warn-bg)";
+    dot.style.background = engaged ? "var(--success)" : "var(--warning)";
+    dot.style.boxShadow = engaged ? "0 0 8px var(--success)" : "none";
+    lab.style.color = engaged ? "var(--success)" : "var(--warning)";
+    lab.textContent = engaged ? "Routing active" : "Routing needs setup";
+  }
+
+  // InstallRouting (install OR engage as appropriate). Open the matching
+  // progress dialog optimistically; the real outcome arrives via installProgress
+  // + routingStatus events (or the demo flow advances it).
+  function onInstallRouting() {
+    var r = S.snap.routing || {};
+    openDialog(r.state === "present" ? "progressEngage" : "progressInstall");
+    call("InstallRouting");
+  }
+
+  // ===========================================================================
+  // SEARCH + sections
+  // ===========================================================================
+  function matchClip(c) {
+    var q = S.search.trim().toLowerCase();
+    if (!q) return true;
+    return c.name.toLowerCase().indexOf(q) !== -1 || c.category.toLowerCase().indexOf(q) !== -1;
+  }
+
+  // Sections in category order (as the catalog/snapshot provides them), each
+  // with its matching clips. Empty sections are dropped.
+  function visibleSections() {
+    var order = S.cats.map(function (c) { return c.name; });
+    var byCat = {};
+    S.clips.forEach(function (c) {
+      if (!matchClip(c)) return;
+      (byCat[c.category] || (byCat[c.category] = [])).push(c);
+    });
+    // Include any category present in clips but not in the cats list (defensive).
+    Object.keys(byCat).forEach(function (k) { if (order.indexOf(k) === -1) order.push(k); });
+    var out = [];
+    order.forEach(function (name) {
+      if (byCat[name] && byCat[name].length) out.push({ name: name, clips: byCat[name] });
+    });
+    return out;
+  }
+
+  function visibleFavClips() {
+    return S.favorites.map(clipById).filter(function (c) { return c && matchClip(c); });
+  }
+
+  // ===========================================================================
+  // CLIP GRID
+  // ===========================================================================
+  function tileNode(c) {
+    var fav = S.favorites.indexOf(c.id) !== -1;
+    var t = el("div", "tile");
+    t.innerHTML =
+      '<span class="accent" style="background:' + chipFor(c.category) + ';"></span>' +
+      '<span class="tplay">' + PLAY_SVG + "</span>" +
+      '<span class="tname">' + esc(c.name) + "</span>" +
+      '<span class="star" style="color:' + (fav ? "var(--warning)" : "var(--faint)") + ';">' + (fav ? "★" : "☆") + "</span>";
+    t.addEventListener("click", function () { playClip(c); });
+    t.querySelector(".star").addEventListener("click", function (e) {
+      e.stopPropagation();
+      toggleFavorite(c.id);
+    });
+    return t;
+  }
+
+  function renderSections() {
+    var host = $("sections");
     host.innerHTML = "";
-    (categories || []).forEach(function (c) {
-      var row = document.createElement("div");
-      row.className = "jump";
-      row.style.cssText =
-        "display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;" +
-        "cursor:pointer;color:var(--dim);font-size:12.5px;font-weight:600;";
+    var secs = visibleSections();
+    var favClips = visibleFavClips();
+    var noResults = !secs.length && !favClips.length;
+    show($("no-results"), noResults);
+
+    // Favourites section (pinned at top).
+    if (favClips.length && !noResults) {
+      var fh = el("div", "sec-head fav");
+      fh.id = "sec-fav";
+      fh.innerHTML =
+        '<span class="sec-star">★</span>' +
+        '<span class="sec-name fav">Favourites</span>' +
+        '<span class="sec-count">' + favClips.length + "</span>";
+      host.appendChild(fh);
+      var fg = el("div", "grid");
+      favClips.forEach(function (c) { fg.appendChild(tileNode(c)); });
+      host.appendChild(fg);
+    }
+
+    secs.forEach(function (s) {
+      var h = el("div", "sec-head");
+      h.id = "sec-" + s.name;
+      h.innerHTML =
+        '<span class="sec-chip" style="background:' + chipFor(s.name) + ';"></span>' +
+        '<span class="sec-name">' + esc(capWords(s.name)) + "</span>" +
+        '<span class="sec-count">' + s.clips.length + "</span>" +
+        '<span class="sec-rule"></span>';
+      host.appendChild(h);
+      var g = el("div", "grid");
+      s.clips.forEach(function (c) { g.appendChild(tileNode(c)); });
+      host.appendChild(g);
+    });
+  }
+
+  // ===========================================================================
+  // PLAY / STOP / FAVOURITE / NOW PLAYING
+  // ===========================================================================
+  function playClip(c) {
+    call("Play", c.id);
+    S.selected = c.id;
+    if (S._perClip[c.id] != null) S.clipGain = S._perClip[c.id];
+    else S.clipGain = 100;
+    // Push to now-playing chips (most-recent-first, capped at 5).
+    S.playing = [{ id: c.id, name: c.name, chip: chipFor(c.category) }]
+      .concat(S.playing.filter(function (p) { return p.id !== c.id; }))
+      .slice(0, 5);
+    renderNowPlaying();
+    renderStopBtn();
+    renderMixer();
+  }
+
+  function stopOne(id) {
+    S.playing = S.playing.filter(function (p) { return p.id !== id; });
+    renderNowPlaying();
+    renderStopBtn();
+  }
+
+  function stopAll() {
+    call("StopAll");
+    S.playing = [];
+    renderNowPlaying();
+    renderStopBtn();
+  }
+
+  function toggleFavorite(id) {
+    var p = call("ToggleFavorite", id);
+    var idx = S.favorites.indexOf(id);
+    var willBeFav = idx === -1;
+    // Optimistic local update; reconcile with the bound return if present.
+    if (willBeFav) S.favorites.push(id); else S.favorites.splice(idx, 1);
+    var c = clipById(id); if (c) c.favorite = willBeFav;
+    var finish = function () { renderSections(); renderSidebar(); };
+    if (p && p.then) {
+      p.then(function (server) {
+        if (typeof server === "boolean" && server !== willBeFav) {
+          // Server disagreed; trust it.
+          var j = S.favorites.indexOf(id);
+          if (server && j === -1) S.favorites.push(id);
+          if (!server && j !== -1) S.favorites.splice(j, 1);
+          if (c) c.favorite = server;
+        }
+        finish();
+      }).catch(finish);
+    } else { finish(); }
+  }
+
+  function renderNowPlaying() {
+    show($("nowplaying"), S.playing.length > 0);
+    var host = $("np-chips");
+    host.innerHTML = "";
+    S.playing.forEach(function (p) {
+      var chip = el("div", "chiprow");
+      chip.innerHTML =
+        '<span class="eq"><span style="height:50%;"></span><span style="height:80%;"></span><span style="height:40%;"></span></span>' +
+        '<span class="np-name">' + esc(p.name) + "</span>" +
+        '<span class="chipx">✕</span>';
+      chip.querySelector(".chipx").addEventListener("click", function () { stopOne(p.id); });
+      host.appendChild(chip);
+    });
+  }
+
+  function renderStopBtn() {
+    var n = S.playing.length;
+    var btn = $("stop-all");
+    btn.classList.toggle("armed", n > 0);
+    $("stop-label").textContent = n > 0 ? "Stop · " + n : "Stop";
+  }
+
+  // ===========================================================================
+  // MIXER DOCK
+  // ===========================================================================
+  function micIcon(p) {
+    return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="' + p + '"/></svg>';
+  }
+  var MIX_ICONS = {
+    mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3",
+    master: "M3 11v2a1 1 0 0 0 1 1h3l4 4V6L7 10H4a1 1 0 0 0-1 1zM16 8a5 5 0 0 1 0 8M19 5a9 9 0 0 1 0 14",
+    monitor: "M3 14v-2a9 9 0 0 1 18 0v2M21 14v3a2 2 0 0 1-2 2h-1v-6h1a2 2 0 0 1 2 1zM3 14a2 2 0 0 1 2-1h1v6H5a2 2 0 0 1-2-2z",
+    clip: "M9 18V5l11-2v13M9 9l11-2"
+  };
+
+  function volRowNode(opts) {
+    // opts: { key, kind('mic'|'master'|'monitor'|'clip'), label, value, disabled,
+    //         muted, onInput }
+    var wrap = el("div", "vol" + (opts.disabled ? " disabled" : ""));
+    var hot = opts.value > 100 && !opts.disabled;
+    var pctTxt = opts.disabled ? "—" : opts.value + "%";
+    wrap.innerHTML =
+      '<div class="v-head">' +
+      '<span class="v-icon' + (opts.disabled ? " off" : "") + '">' + micIcon(MIX_ICONS[opts.kind]) + "</span>" +
+      '<span class="v-label' + (opts.muted ? " muted" : "") + '">' + esc(opts.label) + "</span>" +
+      '<span class="v-pct' + (hot ? " hot" : (opts.disabled ? " off" : "")) + '">' + pctTxt + "</span>" +
+      "</div>" +
+      '<input type="range" class="rng" min="0" max="150" step="1" value="' + opts.value + '"' +
+      (opts.disabled ? " disabled" : "") + ' style="width:100%;background:' +
+      (opts.disabled ? "var(--elev)" : trackFill(opts.value, 150)) + ';">';
+    var input = wrap.querySelector("input");
+    if (!opts.disabled) {
+      input.addEventListener("input", function () {
+        var v = +input.value;
+        opts.onInput(v);
+        // Live track + percent without a full re-render (smooth dragging).
+        input.style.background = trackFill(v, 150);
+        var pctEl = wrap.querySelector(".v-pct");
+        pctEl.textContent = v + "%";
+        pctEl.classList.toggle("hot", v > 100);
+      });
+    }
+    return wrap;
+  }
+
+  function renderMixer() {
+    var host = $("mixer-grid");
+    host.innerHTML = "";
+
+    host.appendChild(volRowNode({
+      kind: "mic", label: "Mic — your voice", value: S.vol.mic,
+      onInput: function (v) { S.vol.mic = v; call("SetVolume", "mic", v / 100); }
+    }));
+    host.appendChild(volRowNode({
+      kind: "master", label: "Others hear", value: S.vol.master,
+      onInput: function (v) { S.vol.master = v; call("SetVolume", "master", v / 100); }
+    }));
+    host.appendChild(volRowNode({
+      kind: "monitor", label: "You hear", value: S.vol.monitor,
+      onInput: function (v) { S.vol.monitor = v; call("SetVolume", "monitor", v / 100); }
+    }));
+
+    var sel = S.selected ? clipById(S.selected) : null;
+    host.appendChild(volRowNode({
+      kind: "clip",
+      label: sel ? "Clip: " + sel.name : "No clip selected",
+      value: S.clipGain, disabled: !sel, muted: !sel,
+      onInput: function (v) {
+        S.clipGain = v;
+        if (sel) { S._perClip[sel.id] = v; call("SetClipVolume", sel.id, v / 100); }
+      }
+    }));
+  }
+
+  // ===========================================================================
+  // AUDIO VIEW — modes, gate, ring meter, toggles, checklist
+  // ===========================================================================
+  var MODE_META = {
+    vad: ["Voice-activated", "opens when you speak"],
+    ptt: ["Push-to-talk", "hold a key to talk"],
+    always: ["Always-on", "mic always live"],
+    mute: ["Mute", "mic off"]
+  };
+  function modeHint(m) {
+    var sub = (MODE_META[m] || ["", ""])[1];
+    return sub.charAt(0).toUpperCase() + sub.slice(1) + ".";
+  }
+
+  function renderModes() {
+    var host = $("mode-grid");
+    host.innerHTML = "";
+    ["vad", "ptt", "always", "mute"].forEach(function (v) {
+      var on = S.micMode === v;
+      var m = MODE_META[v];
+      var b = el("button", "mode" + (on ? " on" : ""));
+      b.type = "button";
+      b.innerHTML =
+        '<span class="m-dot"></span>' +
+        '<span class="m-txt"><span class="m-name">' + m[0] + '</span><span class="m-sub">' + m[1] + "</span></span>";
+      b.addEventListener("click", function () {
+        S.micMode = v;
+        call("SetMicMode", v);
+        renderModes();
+        show($("ptt-block"), v === "ptt");
+        renderSidebar();
+      });
+      host.appendChild(b);
+    });
+    show($("ptt-block"), S.micMode === "ptt");
+  }
+
+  function renderGate() {
+    var g = $("gate");
+    g.value = S.gateSens;
+    g.style.background = trackFill(S.gateSens, 100);
+    $("gate-val").textContent = S.gateSens + "%";
+  }
+
+  var TOGGLE_META = [
+    ["noise", "Noise suppression", "RNNoise — removes background hiss & hum", "SetNoiseSuppression"],
+    ["agc", "Automatic gain control", "Evens out your volume automatically", "SetAGC"],
+    ["duck", "Duck soundboard while talking", "Lowers clips when you speak", "SetDucking"],
+    ["force", "Force through voice gate", "Inaudible tone keeps Discord’s gate open. Does not defeat Krisp.", "SetForceThrough"]
+  ];
+
+  function renderToggles() {
+    var host = $("toggle-grid");
+    host.innerHTML = "";
+    TOGGLE_META.forEach(function (t) {
+      var key = t[0], on = !!S.toggles[key];
+      var row = el("div", "toggle" + (on ? " on" : ""));
       row.innerHTML =
-        '<span style="width:8px;height:8px;border-radius:3px;flex:none;background:' + chipFor(c.name) + ';"></span>' +
-        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-transform:capitalize;">' +
-        prettyCategory(c.name) + "</span>" +
-        '<span class="mono" style="font-size:10px;color:var(--faint);">' + c.count + "</span>";
+        '<span class="box">' + (on ? "✓" : "") + "</span>" +
+        '<div class="t-body"><div class="t-name">' + t[1] + '</div><div class="t-desc">' + esc(t[2]) + "</div></div>";
+      row.addEventListener("click", function () {
+        var next = !S.toggles[key];
+        S.toggles[key] = next;
+        call(t[3], next);
+        renderToggles();
+      });
       host.appendChild(row);
     });
   }
 
-  // The routing pill in the sidebar footer reflects SetupController state:
-  // engaged -> green "Routing active"; anything else -> warning "needs setup".
-  function renderRouting(routing) {
-    routing = routing || {};
-    var engaged = routing.state === "engaged";
-    var pill = document.getElementById("conn-pill");
-    var dot = document.getElementById("conn-dot");
-    var label = document.getElementById("conn-label");
-    pill.style.background = engaged ? "var(--ok-bg)" : "var(--warn-bg)";
-    dot.style.background = engaged ? "var(--success)" : "var(--warning)";
-    dot.style.boxShadow = engaged ? "0 0 8px var(--success)" : "none";
-    label.style.color = engaged ? "var(--success)" : "var(--warning)";
-    label.textContent = engaged ? "Routing active" : "Routing needs setup";
+  var CHECKLIST = [
+    "Set Discord input to “CABLE Output”",
+    "Turn OFF Krisp noise suppression",
+    "Turn OFF echo cancellation & AGC",
+    "Turn OFF automatic input sensitivity"
+  ];
+  function renderChecklist() {
+    var host = $("check-grid");
+    if (host.childElementCount) return; // static — render once
+    CHECKLIST.forEach(function (text) {
+      var item = el("div", "check-item");
+      item.innerHTML =
+        '<span class="tick"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>' +
+        esc(text);
+      host.appendChild(item);
+    });
   }
 
-  function renderStateLine(s) {
-    var clips = (s.clips && s.clips.length) || 0;
-    var cats = (s.categories && s.categories.length) || 0;
-    document.getElementById("ph-state").textContent =
-      "GetState(): " + cats + " categories · " + clips + " clips · theme " + s.theme +
-      " · routing " + (s.routing && s.routing.state);
+  // Ring meter — driven by S.gateLevel (0..1) from the gateLevel event.
+  function renderMeter() {
+    var lvl = S.gateLevel;
+    var open = lvl > 0.5;
+    var deg = Math.round(lvl * 360);
+    var ringCol = open ? "var(--success-glow)" : "var(--primary)";
+    var ring = $("ring");
+    ring.style.background = "conic-gradient(from -90deg, " + ringCol + " " + deg + "deg, var(--elev) " + deg + "deg)";
+    ring.style.boxShadow = open ? "0 0 26px rgba(98,239,147,.45)" : "none";
+
+    $("ring-mic").classList.toggle("open", open);
+    var rs = $("ring-state");
+    rs.textContent = open ? "OPEN" : "closed";
+    rs.classList.toggle("open", open);
+
+    var fill = $("meter-fill");
+    fill.style.width = Math.round(lvl * 100) + "%";
+    fill.classList.toggle("open", open);
   }
 
-  function render(s) {
-    state = s || FALLBACK_STATE;
-    applyTheme(state.theme);
-    renderCategories(state.categories);
-    renderRouting(state.routing);
-    renderStateLine(state);
+  // ===========================================================================
+  // DIALOG (install / engage progress + outcomes)
+  // ===========================================================================
+  // Mirrors the comp's dialog flows. installProgress events advance/replace these.
+  function openDialog(key) {
+    S.dialog = key;
+    renderDialog();
   }
+  function closeDialog() { S.dialog = null; renderDialog(); }
 
-  // --- nav (Soundboard / Mic & Audio) -------------------------------------
-  function setView(view) {
-    document.getElementById("nav-sound").classList.toggle("active", view === "sound");
-    document.getElementById("nav-audio").classList.toggle("active", view === "audio");
-    var title = document.getElementById("ph-title");
-    var sub = document.getElementById("ph-sub");
-    if (view === "audio") {
-      title.textContent = "Mic & Audio — Wails shell";
-      sub.innerHTML = "Mic-processing panel (input mode, gate, live meter, toggles) lands in phase 2, bound to <code>SetMicMode</code> / <code>SetGateSensitivity</code> / the <code>gateLevel</code> event.";
-    } else {
-      title.textContent = "SoundBoard — Wails shell";
-      sub.innerHTML = "Theme foundation + titlebar + sidebar are live. Soundboard grid, mixer dock, and the Audio panel land in phase 2, bound to the Go <code>App</code> methods.";
+  function renderDialog() {
+    var overlay = $("dialog-overlay");
+    if (!S.dialog) { show(overlay, false); return; }
+    show(overlay, true);
+
+    var spinner = false, title = "", body = "", err = false, btns = [];
+    var d = S.dialog;
+    if (d === "progressInstall") {
+      spinner = true; title = "Installing VB-CABLE";
+      body = "Approve the Windows UAC elevation prompt to continue. This installs the virtual audio device.";
+      btns = []; // progress is event-driven; no manual button
+    } else if (d === "progressEngage") {
+      spinner = true; title = "Engaging routing";
+      body = "Routing the soundboard into your microphone path…";
+      btns = [];
+    } else if (d === "error") {
+      err = true; title = "Install failed";
+      body = "Could not locate the CABLE Output device. Try reinstalling VB-CABLE, then retry.";
+      btns = [{ label: "OK", kind: "primary", on: closeDialog }];
+    } else if (d === "engageSuccess") {
+      title = "Routing engaged";
+      body = "The soundboard is now mixed into your microphone — others in your call can hear it.";
+      btns = [{ label: "Nice", kind: "primary", on: closeDialog }];
+    } else if (d === "installSuccess") {
+      title = "VB-CABLE installed";
+      body = "Installation complete. SoundBoard needs to restart to finish wiring the audio routing.";
+      btns = [
+        { label: "Later", kind: "secondary", on: closeDialog },
+        { label: "Restart app", kind: "primary", on: closeDialog }
+      ];
     }
+
+    show($("dialog-spinner"), spinner);
+    var t = $("dialog-title");
+    t.textContent = title;
+    t.classList.toggle("err", err);
+    $("dialog-body").textContent = body;
+
+    var host = $("dialog-btns");
+    host.innerHTML = "";
+    btns.forEach(function (b) {
+      var btn = el("button", "ibtn d-btn " + b.kind, esc(b.label));
+      btn.type = "button";
+      btn.addEventListener("click", b.on);
+      host.appendChild(btn);
+    });
   }
 
-  // --- wiring --------------------------------------------------------------
+  // ===========================================================================
+  // SETTINGS (⚙) PREVIEW POPOVER — drive banner state + dialogs (QA aid)
+  // ===========================================================================
+  function renderDemoPop() {
+    show($("demo-pop"), S.demoOpen);
+    if (!S.demoOpen) return;
+
+    var bhost = $("demo-banner");
+    bhost.innerHTML = "";
+    [["absent", "Cable absent"], ["present", "Cable detected"], ["engaged", "Engaged / ready"]].forEach(function (pair) {
+      var cur = (S.snap.routing || {}).state === pair[0];
+      var row = el("div", "row" + (cur ? " active" : ""), esc(pair[1]));
+      row.addEventListener("click", function () {
+        S.snap.routing = { state: pair[0], detail: "", canEngage: pair[0] === "present" };
+        S.demoOpen = false;
+        renderBanner();
+        renderDemoPop();
+      });
+      bhost.appendChild(row);
+    });
+
+    var dhost = $("demo-dialogs");
+    dhost.innerHTML = "";
+    [["progressInstall", "Install progress"], ["error", "Error"],
+     ["engageSuccess", "Engage success"], ["installSuccess", "Install success"]].forEach(function (pair) {
+      var row = el("div", "row", esc(pair[1]));
+      row.addEventListener("click", function () { S.demoOpen = false; renderDemoPop(); openDialog(pair[0]); });
+      dhost.appendChild(row);
+    });
+  }
+
+  // ===========================================================================
+  // VIEW SWITCH
+  // ===========================================================================
+  function setView(view) {
+    S.view = view;
+    $("nav-sound").classList.toggle("active", view === "sound");
+    $("nav-audio").classList.toggle("active", view === "audio");
+    show($("view-sound"), view === "sound");
+    show($("view-audio"), view === "audio");
+    renderSidebar();
+  }
+
+  // ===========================================================================
+  // FULL RENDER
+  // ===========================================================================
+  function renderAll() {
+    applyTheme();
+    renderBanner();
+    renderSections();
+    renderSidebar();
+    renderNowPlaying();
+    renderStopBtn();
+    renderMixer();
+    renderModes();
+    renderGate();
+    renderToggles();
+    renderChecklist();
+    renderMeter();
+    renderDialog();
+    // search placeholder count from the snapshot total
+    var total = S.clips.length || 212;
+    $("search").placeholder = "Search " + total + " clips by name or category…";
+  }
+
+  // ===========================================================================
+  // WIRING
+  // ===========================================================================
   function wire() {
-    document.getElementById("nav-sound").addEventListener("click", function () { setView("sound"); });
-    document.getElementById("nav-audio").addEventListener("click", function () { setView("audio"); });
+    $("nav-sound").addEventListener("click", function () { setView("sound"); });
+    $("nav-audio").addEventListener("click", function () { setView("audio"); });
 
-    document.getElementById("theme-toggle").addEventListener("click", function () {
-      var next = state.theme === "dark" ? "light" : "dark";
-      state.theme = next;
-      applyTheme(next);
-      var a = App();
-      if (a && a.SetTheme) a.SetTheme(next);
+    $("theme-toggle").addEventListener("click", function () {
+      S.theme = S.theme === "dark" ? "light" : "dark";
+      applyTheme();
+      call("SetTheme", S.theme);
     });
 
-    document.getElementById("win-min").addEventListener("click", function () {
-      var a = App();
-      if (a && a.Minimize) a.Minimize();
+    // Settings (⚙) preview popover.
+    $("demo-toggle").addEventListener("click", function (e) {
+      e.stopPropagation();
+      S.demoOpen = !S.demoOpen;
+      renderDemoPop();
     });
-    var hide = function () {
-      var a = App();
-      if (a && a.HideToTray) a.HideToTray();
-    };
-    document.getElementById("win-tray").addEventListener("click", hide);
-    document.getElementById("win-close").addEventListener("click", hide);
-    document.getElementById("foot-tray").addEventListener("click", hide);
+    document.addEventListener("click", function () {
+      if (S.demoOpen) { S.demoOpen = false; renderDemoPop(); }
+    });
+    $("demo-pop").addEventListener("click", function (e) { e.stopPropagation(); });
 
-    document.getElementById("foot-quit").addEventListener("click", function () {
-      var a = App();
-      if (a && a.Quit) a.Quit();
+    // Window controls.
+    $("win-min").addEventListener("click", function () { call("Minimize"); });
+    var hide = function () { call("HideToTray"); };
+    $("win-tray").addEventListener("click", hide);
+    $("win-close").addEventListener("click", hide);
+    $("foot-tray").addEventListener("click", hide);
+    $("foot-quit").addEventListener("click", function () { call("Quit"); });
+
+    // Search.
+    var search = $("search");
+    search.addEventListener("input", function () {
+      S.search = search.value;
+      show($("search-clear"), !!S.search);
+      renderSections();
+      renderSidebar();
+    });
+    $("search-clear").addEventListener("click", function () {
+      S.search = ""; search.value = "";
+      show($("search-clear"), false);
+      renderSections(); renderSidebar();
+    });
+
+    // Stop-all.
+    $("stop-all").addEventListener("click", stopAll);
+
+    // Gate slider.
+    var gate = $("gate");
+    gate.addEventListener("input", function () {
+      S.gateSens = +gate.value;
+      gate.style.background = trackFill(S.gateSens, 100);
+      $("gate-val").textContent = S.gateSens + "%";
+      call("SetGateSensitivity", S.gateSens / 100);
     });
   }
 
-  // --- live events (Go -> JS) ----------------------------------------------
+  // ===========================================================================
+  // LIVE EVENTS (Go -> JS)
+  // ===========================================================================
   function subscribeEvents() {
-    var rt = runtime();
-    if (!rt || !rt.EventsOn) return;
+    var r = rt();
+    if (!r || !r.EventsOn) return;
 
-    // gateLevel: ~15-30 Hz mic-open level [0..1]. Phase 2 drives the ring meter;
-    // for now we just keep the subscription alive so the contract is exercised.
-    rt.EventsOn("gateLevel", function () { /* phase 2: update meter */ });
-
-    // routingStatus: {state, detail, canEngage} — refresh the sidebar pill live.
-    rt.EventsOn("routingStatus", function (status) {
-      if (status) {
-        state.routing = status;
-        renderRouting(status);
+    // gateLevel: ~15-30 Hz mic-open level [0..1]. Drives the ring meter and the
+    // sidebar mic-status dot. Throttled to animation frames so a 30 Hz feed
+    // never thrashes layout.
+    var pendingLevel = null, rafQueued = false;
+    r.EventsOn("gateLevel", function (p) {
+      var lvl = p && typeof p.level === "number" ? p.level : (typeof p === "number" ? p : 0);
+      pendingLevel = Math.max(0, Math.min(1, lvl));
+      if (!rafQueued) {
+        rafQueued = true;
+        requestAnimationFrame(function () {
+          rafQueued = false;
+          S.gateLevel = pendingLevel;
+          if (S.view === "audio") renderMeter();
+          // keep the sidebar mic dot honest even off the audio view
+          var open = S.gateLevel > 0.5;
+          var dot = $("mic-live-dot");
+          if (dot) {
+            dot.classList.toggle("open", open);
+            $("mic-live-label").textContent = open ? "Mic open" : "Mic closed";
+          }
+        });
       }
     });
 
-    // installProgress: {msg, done, err} — phase 2 drives the install dialog.
-    rt.EventsOn("installProgress", function () { /* phase 2: dialog */ });
+    // routingStatus: {state, detail, canEngage} — refresh banner + pill live, and
+    // advance any open progress dialog to its success state.
+    r.EventsOn("routingStatus", function (status) {
+      if (!status) return;
+      S.snap.routing = status;
+      renderBanner();
+      if (status.state === "engaged") {
+        if (S.dialog === "progressInstall") openDialog("installSuccess");
+        else if (S.dialog === "progressEngage") openDialog("engageSuccess");
+      }
+    });
+
+    // installProgress: {msg, done, err} — drive the dialog body/outcome.
+    r.EventsOn("installProgress", function (p) {
+      p = p || {};
+      if (p.err) { openDialog("error"); $("dialog-body").textContent = p.err; return; }
+      if (S.dialog === "progressInstall" || S.dialog === "progressEngage") {
+        if (p.msg) $("dialog-body").textContent = p.msg;
+        if (p.done) {
+          // Outcome is finalized by the routingStatus event; if none arrives,
+          // fall back to the install-success card after a done install.
+          if (S.dialog === "progressInstall") openDialog("installSuccess");
+          else openDialog("engageSuccess");
+        }
+      }
+    });
   }
 
-  // --- boot ----------------------------------------------------------------
+  // ===========================================================================
+  // BOOT
+  // ===========================================================================
   function boot() {
     wire();
     subscribeEvents();
-    var a = App();
-    if (a && a.GetState) {
-      a.GetState()
-        .then(function (s) { render(s); })
-        .catch(function () { render(FALLBACK_STATE); });
+    var p = call("GetState");
+    if (p && p.then) {
+      p.then(function (snap) { ingest(snap); renderAll(); })
+       .catch(function () { ingest(FALLBACK); renderAll(); });
     } else {
-      // No Wails runtime (plain-browser preview): render the fallback shell.
-      render(FALLBACK_STATE);
+      ingest(FALLBACK);
+      renderAll();
     }
   }
 
