@@ -1,120 +1,36 @@
 package audio
 
-// dsp.go holds the mic-path DSP primitives run on the WORKER goroutine (see
-// worker.go): a high-pass filter, an RMS-target AGC leveler, and a VAD/RMS gate.
+// dsp.go holds the mic-path gate run on the WORKER goroutine (see worker.go) AFTER
+// the WebRTC APM. The heavy DSP — high-pass filter, noise suppression, and automatic
+// gain control — is now done by the real WebRTC AudioProcessingModule in a single
+// ProcessCapture call (internal/apm), so the hand-rolled onePoleHPF, agcLeveler, and
+// the RNNoise denoiser were RETIRED. What remains here is the HARD gate: the APM has
+// no hard mute, so the engine's PTT/Mute/MicMode gating and the VAD latch run on the
+// post-APM signal and ramp the frame to silence when the mic must be closed.
+//
 // Every type here is a plain struct of float state with in-place, allocation-free,
-// lock-free methods so they are safe to drive from the near-real-time worker.
+// lock-free methods so they are safe to drive from the near-real-time worker. They
+// operate on MONO float32 in normalized [-1,1] at 48kHz; the worker chops the mic
+// stream into exactly apm.FrameSize (480) sample frames before processing.
 //
-// These operate on MONO float32 in normalized [-1,1] at 48kHz. The worker chops
-// the mic stream into exactly denoise.FrameSize (480) sample frames before running
-// HPF -> denoise -> AGC -> gate.
-//
-// All coefficients are derived from the canonical 48kHz sample rate (catalog
-// SampleRate) and the documented time constants. They are computed once at
-// construction, never per sample.
+// Coefficients are derived from the canonical 48kHz sample rate (catalog SampleRate)
+// and the documented time constants, computed once at construction, never per sample.
 
 import "math"
 
 // fs is the canonical sample rate as a float for coefficient math.
 const fs = float64(sampleRate)
 
-// --- High-pass filter (~80 Hz) -------------------------------------------------
-
-// onePoleHPF is a first-order high-pass that removes DC, mic rumble, and
-// sub-bass room noise below ~80Hz before denoise/AGC/gate see the signal. The
-// recurrence is the standard RC high-pass:
-//
-//	y[n] = a*(y[n-1] + x[n] - x[n-1])
-//
-// with a = RC/(RC+dt), RC = 1/(2*pi*fc). One multiply-add per sample, no alloc.
-type onePoleHPF struct {
-	a     float32
-	prevX float32
-	prevY float32
-}
-
-// newHPF builds a high-pass at cutoff fc Hz.
-func newHPF(fc float64) *onePoleHPF {
-	rc := 1.0 / (2.0 * math.Pi * fc)
-	dt := 1.0 / fs
-	a := rc / (rc + dt)
-	return &onePoleHPF{a: float32(a)}
-}
-
-// process filters frame in place.
-func (h *onePoleHPF) process(frame []float32) {
-	a := h.a
-	px, py := h.prevX, h.prevY
-	for i, x := range frame {
-		y := a * (py + x - px)
-		frame[i] = y
-		px = x
-		py = y
-	}
-	h.prevX = px
-	h.prevY = py
-}
-
-// reset clears the filter memory (e.g. on stream restart) so a stale sample does
-// not bleed across a gap.
-func (h *onePoleHPF) reset() { h.prevX, h.prevY = 0, 0 }
-
-// --- Automatic gain control (RMS-target leveler) -------------------------------
-
-const (
-	// agcTargetRMS is the leveler's target loudness, ~-16 dBFS in linear RMS
-	// (10^(-16/20) ~= 0.1585). Speech is driven toward this so a quiet talker is
-	// boosted and a loud one is tamed before the gate.
-	agcTargetRMS = 0.158
-
-	// agcMaxGain is the largest boost the AGC may apply (~+18 dB == 10^(18/20)).
-	// Capping the boost stops it from amplifying near-silence (and its noise floor)
-	// into a roar between words.
-	agcMaxGain = 7.94
-
-	// agcMinGain floors the attenuation so a momentary loud transient cannot drive
-	// the gain to zero and swallow the following speech.
-	agcMinGain = 0.1
-
-	// agcFloorRMS is the minimum frame RMS for which the AGC computes a target
-	// gain. Below it the frame is treated as silence and the gain is held (not
-	// boosted), so room hiss between words is never inflated to target level.
-	agcFloorRMS = 0.0008
-)
-
-// agcLeveler is a smoothed RMS-target automatic gain control with a soft limiter.
-// It measures the frame RMS, computes the gain that would bring it to
-// agcTargetRMS (clamped to [agcMinGain, agcMaxGain]), slews the applied gain
-// toward that target one-pole per sample (no per-frame jump -> no zipper noise),
-// and finally runs a tanh soft limiter so the boosted peaks round off instead of
-// hard-clipping.
-type agcLeveler struct {
-	gain   float32 // current applied gain, slewed toward target
-	slewUp float32 // per-sample smoothing coef when increasing gain (slower)
-	slewDn float32 // per-sample smoothing coef when decreasing gain (faster)
-}
-
 // smoothingCoef returns the one-pole coefficient that reaches ~63% of a step in
-// tau seconds at the canonical sample rate: exp(-1/(tau*fs)).
+// tau seconds at the canonical sample rate: exp(-1/(tau*fs)). Shared by the gate's
+// attack/release ramps.
 func smoothingCoef(tau float64) float32 {
 	return float32(math.Exp(-1.0 / (tau * fs)))
 }
 
-// newAGC builds the leveler at unity gain. Gain RISES slowly (~200ms) so a quiet
-// passage is brought up gently, and FALLS faster (~50ms) so a sudden loud sound is
-// tamed before it clips.
-func newAGC() *agcLeveler {
-	return &agcLeveler{
-		gain:   1,
-		slewUp: smoothingCoef(0.200),
-		slewDn: smoothingCoef(0.050),
-	}
-}
-
-// reset returns the leveler to unity gain.
-func (a *agcLeveler) reset() { a.gain = 1 }
-
-// rms returns the root-mean-square of frame (0 for an empty frame).
+// rms returns the root-mean-square of frame (0 for an empty frame). The worker uses
+// it to key the gate/VAD off the POST-APM energy — the level Discord actually
+// receives — and to publish the UI mic-open meter.
 func rms(frame []float32) float32 {
 	if len(frame) == 0 {
 		return 0
@@ -126,58 +42,12 @@ func rms(frame []float32) float32 {
 	return float32(math.Sqrt(sum / float64(len(frame))))
 }
 
-// process levels frame in place. It returns the frame RMS measured BEFORE gain is
-// applied, which the gate reuses so the energy measurement is on the clean
-// (denoised, pre-AGC) signal rather than the artificially boosted one.
-func (a *agcLeveler) process(frame []float32) (preRMS float32) {
-	preRMS = rms(frame)
-
-	// Decide the target gain for this frame. Hold the current gain through near
-	// silence so the noise floor is never inflated.
-	target := a.gain
-	if preRMS > agcFloorRMS {
-		target = agcTargetRMS / preRMS
-		if target > agcMaxGain {
-			target = agcMaxGain
-		} else if target < agcMinGain {
-			target = agcMinGain
-		}
-	}
-
-	coef := a.slewUp
-	if target < a.gain {
-		coef = a.slewDn
-	}
-	g := a.gain
-	for i, x := range frame {
-		g = coef*g + (1-coef)*target
-		y := x * g
-		frame[i] = softClip(y)
-	}
-	a.gain = g
-	return preRMS
-}
-
-// softClip rounds off peaks above ~unity with a tanh-like curve so AGC boosts do
-// not hard-clip. Below |0.7| it is essentially linear; beyond that it compresses
-// toward +/-1. Pure and cheap.
-func softClip(x float32) float32 {
-	const knee = 0.7
-	if x > knee {
-		return knee + (1-knee)*float32(math.Tanh(float64((x-knee)/(1-knee))))
-	}
-	if x < -knee {
-		return -knee + (1-knee)*float32(math.Tanh(float64((x+knee)/(1-knee))))
-	}
-	return x
-}
-
 // --- Noise gate / VAD ----------------------------------------------------------
 
 const (
-	// gateOpenRamp / gateReleaseRamp are the per-sample one-pole coefficients for
-	// the gate gain ramp: attack ~3ms (open) and release ~120ms (close). Ramping
-	// the gain (never hard-muting) is what keeps the gate click-free.
+	// gateAttackTau / gateReleaseTau are the one-pole time constants for the gate
+	// gain ramp: attack ~3ms (open) and release ~120ms (close). Ramping the gain
+	// (never hard-muting) is what keeps the gate click-free.
 	gateAttackTau  = 0.003
 	gateReleaseTau = 0.120
 
@@ -189,7 +59,7 @@ const (
 	// gateMaxThreshold maps gate sensitivity 1.0 to this RMS open threshold. The
 	// configured sensitivity in [0,1] scales linearly to [0, gateMaxThreshold];
 	// the default 0.15 -> ~0.0075 RMS, which opens on a normal speaking voice but
-	// rejects idle room tone.
+	// rejects idle room tone. The energy keyed is the post-APM RMS.
 	gateMaxThreshold = 0.05
 
 	// gateHysteresis is the close-threshold fraction of the open threshold (the

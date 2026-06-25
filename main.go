@@ -36,10 +36,10 @@ import (
 
 	"github.com/gen2brain/malgo"
 
+	"soundboard/internal/apm"
 	"soundboard/internal/audio"
 	"soundboard/internal/catalog"
 	"soundboard/internal/config"
-	"soundboard/internal/denoise"
 	"soundboard/internal/devices"
 	"soundboard/internal/hotkeys"
 	"soundboard/internal/setup"
@@ -141,8 +141,8 @@ func main() {
 	// honest line when noise suppression was requested but RNNoise is unavailable
 	// in this build (it degrades to passthrough rather than failing).
 	applyProcessing(engine, settings)
-	if settings.Processing.NoiseSuppression && !denoise.Available() {
-		log.Printf("noise suppression enabled in settings but RNNoise is unavailable in this build (built without cgo); it will be a no-op")
+	if settings.Processing.NoiseSuppression && !apm.Available() {
+		log.Printf("noise suppression enabled in settings but the WebRTC APM is unavailable (%v); it will be a no-op", apm.LoadError())
 	}
 
 	// Without the VB-CABLE playback endpoint there is nowhere to route the mix.

@@ -4,28 +4,33 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"soundboard/internal/apm"
 )
 
 // newWorkerFor builds a micWorker bound to an engine with rings, WITHOUT starting
 // its goroutine, so tests can call process() deterministically frame by frame. It
-// mirrors what startWorker constructs.
+// mirrors what startWorker constructs: the real WebRTC APM at Discord's config (or
+// a no-op Processor when the APM is unavailable) plus the post-APM hard gate. The
+// NS/AGC toggles are folded in from the engine, exactly as startWorker does, so a
+// test that sets SetAGC/SetNoiseSuppression before building the worker exercises the
+// real APM submodules.
 func newWorkerFor(e *Engine) *micWorker {
+	cfg := apm.DiscordConfig()
+	ns := e.noiseSuppression()
+	ag := e.agc()
+	cfg.NoiseSuppressionEnabled = ns
+	cfg.GainControlEnabled = ag
+	proc, _ := apm.New(cfg)
 	return &micWorker{
-		e:    e,
-		hpf:  newHPF(80),
-		agc:  newAGC(),
-		gate: newGate(),
-		den:  passthroughDenoiser{},
-		stop: make(chan struct{}),
+		e:          e,
+		apm:        proc,
+		gate:       newGate(),
+		nsApplied:  ns,
+		agcApplied: ag,
+		stop:       make(chan struct{}),
 	}
 }
-
-// passthroughDenoiser is a local no-op denoiser so worker tests never depend on
-// whether RNNoise (cgo) is linked; the chain is identical either way.
-type passthroughDenoiser struct{}
-
-func (passthroughDenoiser) Process(frame []float32) float32 { return 0 }
-func (passthroughDenoiser) Close()                          {}
 
 // loudMonoFrame returns a dspFrame-length mono sine well above the gate threshold.
 func loudMonoFrame(ph float64) ([]float32, float64) { return sineFrame(220, 0.25, ph) }
@@ -36,6 +41,7 @@ func TestWorkerMuteModeSilences(t *testing.T) {
 	e := NewEngine(nil, nil)
 	e.SetMicMode("mute")
 	w := newWorkerFor(e)
+	defer w.apm.Close()
 
 	ph := 0.0
 	var last []float32
@@ -60,6 +66,7 @@ func TestWorkerAlwaysModePasses(t *testing.T) {
 	e := NewEngine(nil, nil)
 	e.SetMicMode("always")
 	w := newWorkerFor(e)
+	defer w.apm.Close()
 
 	ph := 0.0
 	var last []float32
@@ -84,6 +91,7 @@ func TestWorkerVADGates(t *testing.T) {
 	e.SetMicMode("vad")
 	e.SetGateSensitivity(0.15)
 	w := newWorkerFor(e)
+	defer w.apm.Close()
 
 	// Loud run -> gate opens, level high.
 	ph := 0.0
@@ -112,6 +120,7 @@ func TestWorkerPTTMode(t *testing.T) {
 	e := NewEngine(nil, nil)
 	e.SetMicMode("ptt")
 	w := newWorkerFor(e)
+	defer w.apm.Close()
 
 	// PTT up + loud signal -> stays closed.
 	e.SetPTTDown(false)
@@ -137,19 +146,68 @@ func TestWorkerPTTMode(t *testing.T) {
 	}
 }
 
-// TestWorkerAGCToggle confirms AGC only boosts when enabled: a quiet frame run with
-// AGC on raises the output RMS above the same run with AGC off.
-func TestWorkerAGCToggle(t *testing.T) {
-	run := func(agcOn bool) float32 {
+// TestWorkerRoutesTogglesToAPM confirms the worker maps the UI NS/AGC toggles to the
+// APM submodules and re-applies them only on change: process() reconfigures the APM
+// when noiseSuppression()/agc() differ from the last-applied state, and the worker's
+// tracked nsApplied/agcApplied follow the engine atomics. This is the worker's actual
+// responsibility (routing), independent of the DLL being present — the no-op
+// Processor's Reconfigure is a harmless no-op, so the bookkeeping is asserted either
+// way.
+func TestWorkerRoutesTogglesToAPM(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.SetMicMode("always")
+	e.SetNoiseSuppression(false)
+	e.SetAGC(false)
+	w := newWorkerFor(e)
+	defer w.apm.Close()
+
+	if w.nsApplied || w.agcApplied {
+		t.Fatalf("worker should start with NS/AGC off as configured, got ns=%v agc=%v", w.nsApplied, w.agcApplied)
+	}
+
+	// Flip both toggles; the next process() must re-apply and update the tracked state.
+	e.SetNoiseSuppression(true)
+	e.SetAGC(true)
+	frame, _ := sineFrame(220, 0.2, 0)
+	w.process(frame)
+	if !w.nsApplied || !w.agcApplied {
+		t.Fatalf("worker should re-apply APM config after toggles flip, got ns=%v agc=%v", w.nsApplied, w.agcApplied)
+	}
+
+	// Flip back; the next process() re-applies again.
+	e.SetNoiseSuppression(false)
+	e.SetAGC(false)
+	frame2, _ := sineFrame(220, 0.2, 0)
+	w.process(frame2)
+	if w.nsApplied || w.agcApplied {
+		t.Fatalf("worker should re-apply APM config after toggles clear, got ns=%v agc=%v", w.nsApplied, w.agcApplied)
+	}
+}
+
+// TestWorkerNoiseSuppressionAttenuates confirms that, with the real APM available,
+// enabling the worker's Noise suppression toggle reduces broadband noise reaching the
+// cable. It drives white noise through the worker in "always" mode (gate open) with
+// NS off vs NS on and asserts the NS-on output is quieter. Skipped when the APM is
+// unavailable (the no-op passthrough cannot suppress noise, which is the documented
+// degraded behavior).
+func TestWorkerNoiseSuppressionAttenuates(t *testing.T) {
+	if !apm.Available() {
+		t.Skip("APM unavailable in this build; NS degrades to passthrough")
+	}
+	run := func(nsOn bool) float32 {
 		e := NewEngine(nil, nil)
-		e.SetMicMode("always") // remove the gate from the equation
-		e.SetAGC(agcOn)
+		e.SetMicMode("always") // gate open so the gate does not mask the comparison
+		e.SetNoiseSuppression(nsOn)
+		e.SetAGC(false)
 		w := newWorkerFor(e)
-		ph := 0.0
+		defer w.apm.Close()
+		rng := newDeterministicRand()
 		var last []float32
-		for i := 0; i < 400; i++ {
-			var frame []float32
-			frame, ph = sineFrame(300, 0.02, ph) // quiet
+		for i := 0; i < 200; i++ {
+			frame := make([]float32, dspFrame)
+			for j := range frame {
+				frame[j] = float32((rng()*2 - 1) * 0.1)
+			}
 			w.process(frame)
 			last = frame
 		}
@@ -157,8 +215,18 @@ func TestWorkerAGCToggle(t *testing.T) {
 	}
 	off := run(false)
 	on := run(true)
-	if on <= off {
-		t.Fatalf("AGC on should boost a quiet mic above AGC off: on %v, off %v", on, off)
+	if on >= off {
+		t.Fatalf("worker NS on should attenuate noise below NS off: on %v, off %v", on, off)
+	}
+}
+
+// newDeterministicRand returns a tiny deterministic LCG-backed [0,1) generator so
+// the NS test needs no extra import and is reproducible.
+func newDeterministicRand() func() float64 {
+	var s uint64 = 0x9e3779b97f4a7c15
+	return func() float64 {
+		s = s*6364136223846793005 + 1442695040888963407
+		return float64(s>>11) / float64(1<<53)
 	}
 }
 

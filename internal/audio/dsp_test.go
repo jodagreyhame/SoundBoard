@@ -19,6 +19,10 @@ func sineFrame(freq, amp float64, ph float64) ([]float32, float64) {
 }
 
 // --- Gate ----------------------------------------------------------------------
+//
+// The high-pass filter, noise suppression, and automatic gain control are now done
+// by the real WebRTC APM (internal/apm), covered by that package's tests. What
+// remains in dsp.go is the post-APM hard gate, exercised here.
 
 // TestGateOpensOnLoudClosesOnQuiet drives the gate with a run of loud frames then
 // a run of quiet frames and checks the gain ramps up toward 1 then back toward 0
@@ -139,137 +143,19 @@ func TestGateForceModes(t *testing.T) {
 	}
 }
 
-// --- AGC -----------------------------------------------------------------------
-
-// TestAGCBoostsQuietTowardTarget feeds a steady quiet signal and confirms the AGC
-// raises its output RMS toward the target over time (gain increases), without
-// exceeding the configured max boost.
-func TestAGCBoostsQuietTowardTarget(t *testing.T) {
-	a := newAGC()
-	const quietAmp = 0.02 // RMS ~0.014, well below the ~0.158 target
-	ph := 0.0
-
-	var firstRMS, lastRMS float32
-	for i := 0; i < 400; i++ { // ~4s of frames -> AGC fully slewed
-		var frame []float32
-		frame, ph = sineFrame(300, quietAmp, ph)
-		a.process(frame)
-		r := rms(frame)
-		if i == 0 {
-			firstRMS = r
-		}
-		lastRMS = r
+// TestRMS confirms the shared RMS helper the gate/meter key off computes the
+// expected root-mean-square: 0 for an empty/silent frame and the sine RMS
+// (amp/sqrt2) for a full-amplitude tone.
+func TestRMS(t *testing.T) {
+	if r := rms(nil); r != 0 {
+		t.Fatalf("rms(nil) = %v, want 0", r)
 	}
-	if lastRMS <= firstRMS {
-		t.Fatalf("AGC should raise output RMS over time: first %v, last %v", firstRMS, lastRMS)
+	if r := rms(make([]float32, dspFrame)); r != 0 {
+		t.Fatalf("rms(silence) = %v, want 0", r)
 	}
-	// Output should approach the target (within a generous band — soft clip and
-	// slew make it approximate) and not blow past it wildly.
-	if lastRMS < 0.05 || lastRMS > agcTargetRMS*1.3 {
-		t.Fatalf("AGC output RMS %v not in a reasonable band around target %v", lastRMS, agcTargetRMS)
-	}
-	// Gain must respect the max-boost cap.
-	if a.gain > agcMaxGain+1e-3 {
-		t.Fatalf("AGC gain %v exceeded cap %v", a.gain, agcMaxGain)
-	}
-}
-
-// TestAGCAttenuatesLoud feeds a loud signal and confirms the AGC pulls its gain
-// below unity to bring the level down toward target.
-func TestAGCAttenuatesLoud(t *testing.T) {
-	a := newAGC()
-	ph := 0.0
-	for i := 0; i < 400; i++ {
-		var frame []float32
-		frame, ph = sineFrame(300, 0.6, ph) // RMS ~0.42 > target
-		a.process(frame)
-	}
-	if a.gain >= 1 {
-		t.Fatalf("AGC should attenuate a loud signal (gain < 1), got %v", a.gain)
-	}
-}
-
-// TestAGCHoldsThroughSilence confirms the AGC does NOT inflate the gain during near
-// silence (so the noise floor between words is not amplified to a roar).
-func TestAGCHoldsThroughSilence(t *testing.T) {
-	a := newAGC()
-	a.gain = 1
-	for i := 0; i < 200; i++ {
-		frame := make([]float32, dspFrame) // pure silence, RMS 0 < agcFloorRMS
-		a.process(frame)
-	}
-	if a.gain > 1.01 {
-		t.Fatalf("AGC must not boost during silence, gain crept to %v", a.gain)
-	}
-}
-
-// TestSoftClipBounded confirms softClip keeps output within [-1,1] for all inputs
-// (tanh saturates to exactly +/-1 only in the extreme), compresses moderate
-// overshoots BELOW full scale, and is roughly linear near zero.
-func TestSoftClipBounded(t *testing.T) {
-	// Output is never outside full scale, even for huge inputs.
-	for _, x := range []float32{-100, -2, -1, -0.3, 0, 0.3, 1, 2, 100} {
-		y := softClip(x)
-		if y > 1 || y < -1 {
-			t.Errorf("softClip(%v) = %v outside [-1,1]", x, y)
-		}
-	}
-	// A moderate overshoot (1.0) is compressed strictly below full scale (the knee
-	// rounds it off) rather than hard-clipped — that is the point of the soft clip.
-	if y := softClip(1.0); y >= 1 {
-		t.Errorf("softClip(1.0) should compress below 1, got %v", y)
-	}
-	if !approx(softClip(0.1), 0.1) {
-		t.Errorf("softClip should be ~linear near 0, got %v", softClip(0.1))
-	}
-}
-
-// --- HPF -----------------------------------------------------------------------
-
-// TestHPFRemovesDC confirms the high-pass strips a DC offset (its steady-state
-// output tends to 0 for a constant input).
-func TestHPFRemovesDC(t *testing.T) {
-	h := newHPF(80)
-	frame := make([]float32, dspFrame)
-	for i := range frame {
-		frame[i] = 0.5 // constant DC
-	}
-	// Run several frames so the filter settles.
-	for i := 0; i < 10; i++ {
-		f := make([]float32, dspFrame)
-		for j := range f {
-			f[j] = 0.5
-		}
-		h.process(f)
-		frame = f
-	}
-	if math.Abs(float64(frame[len(frame)-1])) > 0.05 {
-		t.Fatalf("HPF should strip DC, tail sample = %v", frame[len(frame)-1])
-	}
-}
-
-// TestHPFPassesHighAttenuatesLow compares the filter's effect on a high-frequency
-// tone vs a very low one: the low tone (below cutoff) is attenuated far more.
-func TestHPFPassesHighAttenuatesLow(t *testing.T) {
-	measure := func(freq float64) float32 {
-		h := newHPF(80)
-		var ph float64
-		var last []float32
-		for i := 0; i < 20; i++ { // settle then measure
-			var f []float32
-			f, ph = sineFrame(freq, 0.5, ph)
-			h.process(f)
-			last = f
-		}
-		return rms(last)
-	}
-	low := measure(20)    // well below 80Hz cutoff -> heavily attenuated
-	high := measure(2000) // well above -> passes
-	if high <= low {
-		t.Fatalf("HPF should pass high (%v) more than low (%v)", high, low)
-	}
-	// The 2kHz tone should pass nearly unchanged (input RMS ~0.354).
-	if high < 0.3 {
-		t.Fatalf("HPF over-attenuated the 2kHz passband tone: RMS %v", high)
+	frame, _ := sineFrame(200, 0.5, 0)
+	want := float32(0.5 / math.Sqrt2)
+	if r := rms(frame); math.Abs(float64(r-want)) > 0.02 {
+		t.Fatalf("rms(0.5 sine) = %v, want ~%v", r, want)
 	}
 }
