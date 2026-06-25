@@ -142,6 +142,23 @@ func TestProcessingNormalizeEdges(t *testing.T) {
 			t.Errorf("MicMode %q: GateSensitivity = %v, want 0.5 (preserved)", mode, p.GateSensitivity)
 		}
 	}
+
+	// MonitorSource: an empty or unrecognized value coerces to "clips" (the safe
+	// default = legacy behavior); each valid value survives normalize() verbatim.
+	for _, in := range []string{"", "bogus", "TRANSMITTED"} {
+		p := AudioProcessing{MonitorSource: in}
+		p.normalize()
+		if p.MonitorSource != MonitorSourceClips {
+			t.Errorf("MonitorSource %q: normalize() = %q, want %q (default)", in, p.MonitorSource, MonitorSourceClips)
+		}
+	}
+	for _, src := range []string{MonitorSourceClips, MonitorSourceTransmitted} {
+		p := AudioProcessing{MonitorSource: src}
+		p.normalize()
+		if p.MonitorSource != src {
+			t.Errorf("MonitorSource %q not preserved, got %q", src, p.MonitorSource)
+		}
+	}
 }
 
 // TestFavoritesRoundTrip pins that a non-empty, ORDERED favourites list survives
@@ -193,7 +210,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		Favorites: []string{"memes/airhorn", "games/level-up"},
 		Window:    WindowPrefs{Width: 800, Height: 600},
 		// The mic-processing block must round-trip every field, including the
-		// non-default MicMode and a custom gate sensitivity.
+		// non-default MicMode, a custom gate sensitivity, and the non-default
+		// MonitorSource (the confidence-monitor setting).
 		Processing: AudioProcessing{
 			NoiseSuppression: true,
 			AGC:              true,
@@ -202,6 +220,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 			GateSensitivity:  0.42,
 			ForceThrough:     true,
 			PTTHotkey:        "ctrl+grave",
+			MonitorSource:    MonitorSourceTransmitted,
 		},
 	}
 

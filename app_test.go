@@ -64,6 +64,7 @@ func TestGetStateAssemblesFromCatalog(t *testing.T) {
 			MicMode:         config.MicModePTT,
 			GateSensitivity: 0.42,
 			AGC:             true,
+			MonitorSource:   config.MonitorSourceTransmitted,
 		},
 	}
 	app := newAppWithBackend(fakeBackend(t, fsys, s))
@@ -135,6 +136,10 @@ func TestGetStateAssemblesFromCatalog(t *testing.T) {
 	}
 	if !st.Audio.AGC || st.Audio.NoiseSuppression || st.Audio.Ducking || st.Audio.ForceThrough {
 		t.Errorf("audio toggles = %+v, want only AGC true", st.Audio)
+	}
+	// MonitorSource (the confidence-monitor setting) carried through to the snapshot.
+	if st.Audio.MonitorSource != config.MonitorSourceTransmitted {
+		t.Errorf("audio.monitorSource = %q, want %q", st.Audio.MonitorSource, config.MonitorSourceTransmitted)
 	}
 
 	// Routing: cable absent.

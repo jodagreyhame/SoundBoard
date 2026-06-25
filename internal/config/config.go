@@ -108,6 +108,33 @@ type AudioProcessing struct {
 	// PTTHotkey is the combo (e.g. "ctrl+grave") that opens the mic in "ptt" mode.
 	// Empty means no PTT binding is registered. Parsed by internal/hotkeys.
 	PTTHotkey string `json:"pttHotkey,omitempty"`
+	// MonitorSource selects what the local monitor (the user's headset) plays: one
+	// of "clips" (the default — clean clips only, the user hears their own voice
+	// acoustically) or "transmitted" (the confidence monitor — the EXACT cable-bound
+	// mix of processedMic + clips, so the user can audit what Discord receives).
+	// normalize() defaults an empty/invalid value to "clips". This is a monitor
+	// auditing aid only; it never changes what is transmitted to Discord.
+	MonitorSource string `json:"monitorSource,omitempty"`
+}
+
+// MonitorSource names the two monitor-source modes. Stored as a lowercase string
+// in the config so it is human-editable and forward-compatible. normalize()
+// coerces an empty or unrecognized value back to MonitorSourceClips.
+const (
+	// MonitorSourceClips plays only the triggered clips on the monitor (default).
+	MonitorSourceClips = "clips"
+	// MonitorSourceTransmitted plays the exact cable-bound mix (processedMic + clips)
+	// on the monitor — the confidence monitor.
+	MonitorSourceTransmitted = "transmitted"
+)
+
+// validMonitorSource reports whether m is one of the two recognized monitor sources.
+func validMonitorSource(m string) bool {
+	switch m {
+	case MonitorSourceClips, MonitorSourceTransmitted:
+		return true
+	}
+	return false
 }
 
 // defaultGateSensitivity is the gate threshold used when none is configured. Low
@@ -225,6 +252,9 @@ func (p *AudioProcessing) normalize() {
 	}
 	if p.GateSensitivity > 1 {
 		p.GateSensitivity = 1
+	}
+	if !validMonitorSource(p.MonitorSource) {
+		p.MonitorSource = MonitorSourceClips
 	}
 }
 

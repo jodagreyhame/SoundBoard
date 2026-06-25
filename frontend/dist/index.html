@@ -144,6 +144,21 @@
                 <span class="m-sub">applies instantly · saved on exit · only “others hear” reaches Discord</span>
               </div>
               <div id="mixer-grid" class="mixer-grid"></div>
+
+              <!-- CONFIDENCE MONITOR — choose what YOUR headphones play: the clean
+                   clips only (default), or the EXACT signal sent to Discord
+                   (processed mic + clips) so you can audit the transmitted quality.
+                   Wired to App.SetMonitorSource; seeded from state.audio.monitorSource. -->
+              <div class="monsrc">
+                <div class="monsrc-head">
+                  <span class="monsrc-title">What you hear</span>
+                  <div id="monsrc-seg" class="seg" role="group" aria-label="Monitor source">
+                    <button id="monsrc-clips" class="seg-btn" type="button" data-src="clips">Clips only</button>
+                    <button id="monsrc-tx" class="seg-btn" type="button" data-src="transmitted">Exactly what Discord hears</button>
+                  </div>
+                </div>
+                <div id="monsrc-cap" class="monsrc-cap"></div>
+              </div>
             </div>
           </div>
 

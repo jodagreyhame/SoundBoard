@@ -375,6 +375,16 @@ html, body {
 .vol .v-pct.off { color: var(--faint); }
 .vol .rng { width: 100%; }
 
+/* Confidence monitor — "What you hear" segmented control under the mixer grid. */
+.monsrc { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
+.monsrc-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.monsrc-title { font-size: 11px; font-weight: 700; color: var(--dim); }
+.seg { display: inline-flex; background: var(--elev); border: 1px solid var(--line2); border-radius: 9px; padding: 2px; gap: 2px; }
+.seg-btn { font-family: inherit; font-size: 11px; font-weight: 600; color: var(--dim); background: transparent; border: none; border-radius: 7px; padding: 5px 11px; cursor: pointer; transition: background .12s, color .12s; white-space: nowrap; }
+.seg-btn:hover { color: var(--fg); }
+.seg-btn.on { background: var(--primary); color: #fff; }
+.monsrc-cap { margin-top: 7px; font-size: 11px; line-height: 1.5; color: var(--faint); max-width: 760px; }
+
 /* ---------------------------------------------------------------------------
  * Audio view
  * ------------------------------------------------------------------------- */

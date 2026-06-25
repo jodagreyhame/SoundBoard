@@ -379,6 +379,7 @@ func applyProcessingW(engine *audio.Engine, s *config.Settings) {
 	engine.SetAGC(s.Processing.AGC)
 	engine.SetDucking(s.Processing.Ducking)
 	engine.SetForceThrough(s.Processing.ForceThrough)
+	engine.SetMonitorSource(s.Processing.MonitorSource)
 }
 
 func clipGainW(s *config.Settings, id string) float32 {

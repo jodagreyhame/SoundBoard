@@ -39,6 +39,15 @@ const (
 	// periods is the number of periods miniaudio keeps queued.
 	periods = 3
 
+	// tapRingCapPeriods sizes the confidence-monitor TAP ring in whole periods of
+	// interleaved-stereo samples. The duplex and monitor devices both run at
+	// periodFrames, so in steady state the ring oscillates around one period of
+	// lead (set by the Start() prime); a handful of periods of slack absorbs the
+	// scheduling jitter between the two independent device clocks without ever
+	// forcing the producer to drop a period. 8 periods (~32 ms of stereo headroom)
+	// matches the in/out rings' generosity.
+	tapRingCapPeriods = 8
+
 	// fadeFrames is the length of the linear fade-in (clip start) and fade-out
 	// (clip end) ramp, ~4ms at 48kHz, to suppress clicks. Applied per frame so
 	// both channels of an interleaved frame share the same gain.
@@ -55,6 +64,32 @@ const (
 	// quiet mic or clip without permitting extreme values that would just slam
 	// every sample into the [-1,1] clamp and clip badly.
 	maxGain = 1.5
+)
+
+// monSource* are the RT-friendly integer encodings of the two monitor SOURCE
+// modes — what the local monitor device (the user's headset) plays. The monitor
+// callback reads monitorSourceBits (an atomic.Int32) once per buffer instead of
+// comparing strings on the audio thread. SetMonitorSource maps a config string to
+// one of these; an unknown string falls back to monSourceClips.
+//
+//   - monSourceClips      : the DEFAULT (and historical) behavior — the monitor
+//     plays ONLY the triggered clips (no mic). The user hears clean clips plus
+//     their own natural voice acoustically; the processed mic is NOT echoed back.
+//   - monSourceTransmitted: the CONFIDENCE-MONITOR mode — the monitor plays the
+//     EXACT signal written to the cable (processedMic + clips), so the user can
+//     audit what Discord actually receives. The duplex callback taps its final
+//     cable mix into a dedicated SPSC ring and the monitor callback drains it.
+const (
+	monSourceClips       int32 = 0 // monitor plays clips only (default, legacy)
+	monSourceTransmitted int32 = 1 // monitor plays the exact cable-bound mix
+)
+
+// MonitorSourceClips / MonitorSourceTransmitted are the config/UI string values
+// that map to the encodings above. Exported so config, the App binding, and the
+// UI share one spelling and never drift.
+const (
+	MonitorSourceClips       = "clips"
+	MonitorSourceTransmitted = "transmitted"
 )
 
 // clampGain constrains a linear gain to [0, maxGain]. Shared by every gain
@@ -171,6 +206,16 @@ type Engine struct {
 	masterGainBits  atomic.Uint32
 	monitorGainBits atomic.Uint32
 
+	// monitorSourceBits selects WHAT the monitor device plays — the legacy
+	// clips-only mix (monSourceClips, default) or the exact cable-bound transmit
+	// mix (monSourceTransmitted, the confidence monitor). Written by the UI thread
+	// via SetMonitorSource and read lock-free by BOTH RT callbacks once per buffer:
+	// the duplex callback consults it to decide whether to TAP its final cable mix
+	// into the tap ring, and the monitor callback consults it to decide whether to
+	// DRAIN that ring instead of mixing clips. Atomic so a mode change never touches
+	// ctrlMu or contends with the RT path.
+	monitorSourceBits atomic.Int32
+
 	// --- Mic-path processing-suite controls (see processing.go) ---
 	//
 	// All are atomic so any goroutine (UI, hotkeys) may set them and the RT
@@ -212,6 +257,21 @@ type Engine struct {
 	outRing *ringSPSC
 	worker  *micWorker
 
+	// tapRing carries the EXACT interleaved-stereo cable mix from duplexCallback
+	// (producer) to monitorCallback (consumer) when MonitorSource is "transmitted".
+	// It is a lock-free SPSC ring of INTERLEAVED samples (NOT mono like in/outRing):
+	// duplexCallback pushes its whole final `out` buffer each period, monitorCallback
+	// pulls one period out. Allocated once in Configure, primed in Start (one period
+	// of lead, like outRing, to absorb the duplex<->monitor clock drift), and reset
+	// on teardown so the RT path never allocates. In "clips" mode it is left idle.
+	tapRing *ringSPSC
+
+	// monTapHold is the monitor callback's "hold-last" seam value per channel: on a
+	// tap-ring underrun it ramps the last delivered frame down to silence rather than
+	// splicing a hard gap, applying the buzz-fix lesson (no raw splice, click-free).
+	// Callback-owned (monitorCallback only); sized to one interleaved frame.
+	monTapHold []float32
+
 	// duplexCallback-owned scratch, preallocated in Configure so the RT path is
 	// allocation-free: monIn holds the downmixed mono mic for a buffer, monOut the
 	// processed mono pulled back from the worker. Sized to one period of frames;
@@ -238,6 +298,10 @@ func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 	e.micGainBits.Store(float32bits(1))
 	e.masterGainBits.Store(float32bits(1))
 	e.monitorGainBits.Store(float32bits(1))
+	// Monitor source defaults to clips-only so a fresh engine reproduces the exact
+	// historical monitor behavior (clean clips on the headset, natural voice
+	// acoustically); main overrides it from saved settings via SetMonitorSource.
+	e.monitorSourceBits.Store(monSourceClips)
 	// Mic-processing defaults mirror config.AudioProcessing's normalize: gate by
 	// voice activity at the default sensitivity, every optional feature off. main
 	// overrides these from saved settings at startup via the Set* methods.
@@ -275,6 +339,45 @@ func (e *Engine) SetMonitorGain(g float32) {
 func (e *Engine) micGain() float32     { return float32frombits(e.micGainBits.Load()) }
 func (e *Engine) masterGain() float32  { return float32frombits(e.masterGainBits.Load()) }
 func (e *Engine) monitorGain() float32 { return float32frombits(e.monitorGainBits.Load()) }
+
+// SetMonitorSource selects WHAT the local monitor device plays from a config/UI
+// string: MonitorSourceClips ("clips", the default) or MonitorSourceTransmitted
+// ("transmitted", the confidence monitor). An empty or unrecognized value is
+// treated as "clips". Safe to call from any goroutine; both RT callbacks pick the
+// new mode up on their next buffer via a single atomic load. The string is mapped
+// to an int encoding here so the audio thread never compares strings.
+//
+// "transmitted" makes the monitor play the EXACT signal sent to the cable
+// (processedMic + clips) so the user can audit the transmitted quality. It applies
+// even at unity monitor gain and is independent of the monitor on/off and monitor
+// gain controls, which still take effect (the gain scales the drained tap mix).
+func (e *Engine) SetMonitorSource(mode string) {
+	var m int32
+	switch mode {
+	case MonitorSourceTransmitted:
+		m = monSourceTransmitted
+	default: // MonitorSourceClips and anything unknown
+		m = monSourceClips
+	}
+	e.monitorSourceBits.Store(m)
+}
+
+// monitorSource reads the current monitor-source encoding lock-free (RT helper).
+func (e *Engine) monitorSource() int32 { return e.monitorSourceBits.Load() }
+
+// monitorTransmitting reports whether the monitor is in "transmitted" mode, read
+// lock-free by both RT callbacks (duplex taps, monitor drains) once per buffer.
+func (e *Engine) monitorTransmitting() bool { return e.monitorSource() == monSourceTransmitted }
+
+// GetMonitorSource returns the current monitor source as its config/UI string
+// ("clips" | "transmitted") so the App snapshot (GetState) can report it. Safe to
+// call from any goroutine; a single atomic load.
+func (e *Engine) GetMonitorSource() string {
+	if e.monitorSource() == monSourceTransmitted {
+		return MonitorSourceTransmitted
+	}
+	return MonitorSourceClips
+}
 
 // Configure sets up the malgo DUPLEX device: Capture=mic, Playback=cable,
 // FormatF32, 48k, 2ch, small period (128-256 frames). It does not start it.
@@ -332,6 +435,16 @@ func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 	e.monIn = make([]float32, periodFrames)
 	e.monOut = make([]float32, periodFrames)
 	e.duckEnv = 0
+
+	// Allocate the confidence-monitor TAP ring. Unlike in/outRing (mono), it carries
+	// INTERLEAVED stereo samples: duplexCallback pushes a whole period of `out`
+	// (periodFrames*channels samples) and monitorCallback pulls one period. Size it
+	// to several periods so a small duplex<->monitor scheduling jitter never forces a
+	// producer drop in steady state. monTapHold is one interleaved frame of seam
+	// scratch for the monitor's hold-last underrun ramp. Allocated here, off the
+	// audio thread, so neither callback ever allocates.
+	e.tapRing = newRing(tapRingCapPeriods * periodFrames * channels)
+	e.monTapHold = make([]float32, channels)
 
 	cfg := malgo.DefaultDeviceConfig(malgo.Duplex)
 	cfg.SampleRate = sampleRate
@@ -455,6 +568,26 @@ func (e *Engine) primeOutputRing() {
 	e.outRing.push(prime[:])
 }
 
+// primeTapRing preloads the confidence-monitor TAP ring with exactly ONE period of
+// interleaved-stereo silence so the monitor callback starts one full period BEHIND
+// the duplex callback's tap. Both devices run at periodFrames, but they are driven
+// by INDEPENDENT clocks (separate malgo playback devices), so without a lead the
+// monitor's pull and the duplex's push race frame-for-frame: any scheduling jitter
+// that lets the monitor pull before the duplex pushes yields a partial/empty pull
+// and a seam on every such beat. One period of preloaded silence gives the monitor
+// a full period of slack to absorb that drift, so its pull stays full in steady
+// state (mirroring outRing's prime, which kills the duplex's own framing seam). The
+// prefill is pure silence: it adds ~4 ms of monitor latency and is inaudible. It
+// uses the real push API and must run off the audio thread with no callback running
+// — exactly the conditions Start() holds.
+func (e *Engine) primeTapRing() {
+	if e.tapRing == nil {
+		return
+	}
+	var prime [periodFrames * channels]float32
+	e.tapRing.push(prime[:])
+}
+
 // Start activates all configured devices.
 func (e *Engine) Start() error {
 	e.ctrlMu.Lock()
@@ -484,6 +617,14 @@ func (e *Engine) Start() error {
 		// primeOutputRing for the full LCM(192,480)=960 derivation. Reset first so a
 		// restart begins from empty, then prime exactly one frame of headroom.
 		e.primeOutputRing()
+	}
+	if e.tapRing != nil {
+		// Reset then prime the confidence-monitor tap ring with one period of silence
+		// so the monitor device (independent clock) starts a full period behind the
+		// duplex tap and never races it frame-for-frame. See primeTapRing. Harmless in
+		// "clips" mode: the ring just holds idle silence the monitor never drains.
+		e.tapRing.reset()
+		e.primeTapRing()
 	}
 	e.startWorker()
 
@@ -532,6 +673,9 @@ func (e *Engine) Stop() error {
 	}
 	if e.outRing != nil {
 		e.outRing.reset()
+	}
+	if e.tapRing != nil {
+		e.tapRing.reset()
 	}
 	e.setGateLevel(0)
 
@@ -615,20 +759,112 @@ func (e *Engine) StopAll() {
 // callback stays here because it shares no mic-DSP state.
 
 // monitorCallback is the real-time mixer for the local monitor device (what the
-// USER hears). It plays ONLY clip audio (no mic passthrough), scaling the clips
-// by the INDEPENDENT monitor ("you hear") gain, read once per buffer via a
-// single atomic load. Allocation-free in steady state and lock-free.
+// USER hears). Its behavior depends on the MonitorSource mode, read once per buffer
+// via a single atomic load:
+//
+//   - "clips" (default): plays ONLY clip audio (no mic passthrough), scaling the
+//     clips by the INDEPENDENT monitor ("you hear") gain. This is the exact legacy
+//     behavior — the user hears clean clips plus their own natural voice.
+//   - "transmitted" (confidence monitor): plays the EXACT cable-bound mix
+//     (processedMic + clips) that duplexCallback tapped into the tap ring, scaled by
+//     the monitor gain, so the user auditions precisely what Discord receives. The
+//     tapped mix ALREADY contains the clips, so the monitor cursors are NOT mixed in
+//     here (that would double them); they are still drained so the handoff channel
+//     and stop flag never back up.
+//
+// Allocation-free in steady state and lock-free in both modes.
 func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 	_ = pInput
-	e.monCursors = drainInto(e.monPending, e.monCursors)
-	e.monCursors = clearOnStop(&e.monStopFlag, e.monCursors, e.monPending)
 
 	out := bytesAsF32(pOutput)
 	n := int(frameCount) * channels
 	if n > len(out) {
 		n = len(out)
 	}
+
+	if e.tapRing != nil && e.monitorTransmitting() {
+		// CONFIDENCE-MONITOR PATH. Drain the cable-bound mix from the tap ring into
+		// the monitor output. The clips ride along inside the tapped mix, so we do NOT
+		// mix monCursors here — but we still drain monPending and consume the stop flag
+		// so a triggered clip queued for the monitor (Trigger enqueues to both paths)
+		// and a StopAll never pile up while in this mode. The drained cursors are then
+		// discarded (truncated) without mixing.
+		e.monCursors = drainInto(e.monPending, e.monCursors)
+		e.monCursors = clearOnStop(&e.monStopFlag, e.monCursors, e.monPending)
+		e.monCursors = e.monCursors[:0]
+
+		e.fillMonitorFromTap(out[:n], e.monitorGain())
+		return
+	}
+
+	// CLIPS PATH (legacy, unchanged). Mix only the triggered clips, scaled by the
+	// monitor gain.
+	e.monCursors = drainInto(e.monPending, e.monCursors)
+	e.monCursors = clearOnStop(&e.monStopFlag, e.monCursors, e.monPending)
 	e.monCursors = mixInto(out[:n], nil, e.monCursors, e.monitorGain())
+}
+
+// fillMonitorFromTap writes one monitor buffer from the confidence-monitor tap
+// ring, applying the monitor gain. It is the "transmitted"-mode core and is
+// allocation-free and lock-free.
+//
+// On a FULL pull (the steady state, kept so by the one-period tap-ring prime) it
+// copies the tapped cable mix straight out at the monitor gain and remembers the
+// last frame as the hold-last seam value. On a PARTIAL/empty pull (the monitor
+// device momentarily outran the duplex tap) it does NOT splice raw or stale audio
+// in — applying the buzz-fix lesson — it HOLDS the last delivered frame and linearly
+// ramps it down to silence over spliceRampFrames, then stays silent for the rest of
+// the buffer. That keeps the underrun seam click-free and leaks no stale signal,
+// exactly like the duplex path's hold-and-ramp on its own underrun.
+func (e *Engine) fillMonitorFromTap(out []float32, gain float32) {
+	got := e.tapRing.pull(out)
+	if got > len(out) {
+		got = len(out)
+	}
+
+	// Apply the monitor gain to the delivered (tapped) samples in place. The tapped
+	// mix is already at cable level; gain is the user's local "you hear" level.
+	if gain != 1 {
+		for i := 0; i < got; i++ {
+			out[i] *= gain
+		}
+	}
+
+	// Remember the last fully-delivered frame as the hold-last seam (gained), so a
+	// later underrun ramps from the real signal rather than a hard gap.
+	if got >= channels {
+		base := got - channels
+		for ch := 0; ch < channels; ch++ {
+			e.monTapHold[ch] = out[base+ch]
+		}
+	}
+
+	if got >= len(out) {
+		return // full buffer delivered; nothing to fill.
+	}
+
+	// Underrun tail: fill from `got` to the end. HOLD the last seam frame and ramp it
+	// to silence over spliceRampFrames frames, then stay silent. No raw/stale splice
+	// (buzz-fix). The ramp is keyed per FRAME, so start at the first WHOLE frame at or
+	// after `got`: any sub-frame straggler in [got, ceilFrame*channels) — which only
+	// occurs if a pull ever returned a partial frame, never in steady state since
+	// periods are pushed whole — is filled at full hold (step 0) so it is never left
+	// uninitialized, and the delivered samples below `got` are never overwritten.
+	ceilFrame := (got + channels - 1) / channels // first whole frame >= got
+	for i := got; i < ceilFrame*channels && i < len(out); i++ {
+		out[i] = e.monTapHold[i%channels]
+	}
+	frames := len(out) / channels
+	for f := ceilFrame; f < frames; f++ {
+		var ramp float32
+		if step := f - ceilFrame; step < spliceRampFrames {
+			ramp = 1 - float32(step+1)/float32(spliceRampFrames)
+		}
+		base := f * channels
+		for ch := 0; ch < channels; ch++ {
+			out[base+ch] = e.monTapHold[ch] * ramp
+		}
+	}
 }
 
 // drainInto pops every clip currently queued in ch and appends a fresh cursor

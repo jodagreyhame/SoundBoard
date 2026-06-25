@@ -75,7 +75,7 @@
     ],
     clips: [], favorites: [],
     volumes: { mic: 1, master: 1, monitor: 1 }, perClip: {},
-    audio: { micMode: "vad", gateSensitivity: 0.15, noiseSuppression: false, agc: false, ducking: false, forceThrough: false }
+    audio: { micMode: "vad", gateSensitivity: 0.15, noiseSuppression: false, agc: false, ducking: false, forceThrough: false, monitorSource: "clips" }
   };
 
   var S = {
@@ -93,6 +93,7 @@
     micMode: "vad",
     gateSens: 15,             // percent 0..100
     gateLevel: 0,             // 0..1 from the gateLevel event
+    monSrc: "clips",          // 'clips' | 'transmitted' — what the monitor plays
     toggles: { noise: false, agc: false, duck: false, force: false },
     demoOpen: false,
     dialog: null              // dialog key or null
@@ -116,6 +117,7 @@
     var au = sn.audio || {};
     S.micMode = au.micMode || "vad";
     S.gateSens = Math.round((au.gateSensitivity != null ? au.gateSensitivity : 0.15) * 100);
+    S.monSrc = au.monitorSource === "transmitted" ? "transmitted" : "clips";
     S.toggles = {
       noise: !!au.noiseSuppression, agc: !!au.agc,
       duck: !!au.ducking, force: !!au.forceThrough
@@ -536,6 +538,45 @@
   }
 
   // ===========================================================================
+  // CONFIDENCE MONITOR — "What you hear" segmented control
+  // ===========================================================================
+  // Two captions explain the trade-off. "Clips only" is the default and what the
+  // app has always done; "Exactly what Discord hears" routes the EXACT cable-bound
+  // mix (your processed mic + clips) to your headphones so you can audit the
+  // transmitted quality. The CAVEAT (slight delay; echo-y over open speakers
+  // because you also hear your own voice acoustically; best with headphones) is in
+  // the caption — it is EXPECTED and it IS what others hear.
+  var MONSRC_CAP = {
+    clips: "Your headphones play the clips only — you hear your own voice naturally. " +
+      "Nothing extra is sent to Discord.",
+    transmitted: "Your headphones play the EXACT signal sent to Discord — your processed " +
+      "mic plus clips — with a small delay, so you can audition the transmitted quality. " +
+      "Expect a slight echo of your own voice (it’s delayed against your natural voice); " +
+      "best with headphones. This does not change what Discord receives."
+  };
+
+  function renderMonSource() {
+    var seg = $("monsrc-seg");
+    if (!seg) return;
+    var btns = seg.querySelectorAll(".seg-btn");
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].getAttribute("data-src") === S.monSrc;
+      btns[i].classList.toggle("on", on);
+      btns[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    var cap = $("monsrc-cap");
+    if (cap) cap.textContent = MONSRC_CAP[S.monSrc] || MONSRC_CAP.clips;
+  }
+
+  function setMonSource(src) {
+    src = src === "transmitted" ? "transmitted" : "clips";
+    if (src === S.monSrc) return;
+    S.monSrc = src;
+    call("SetMonitorSource", src);
+    renderMonSource();
+  }
+
+  // ===========================================================================
   // AUDIO VIEW — modes, gate, ring meter, toggles, checklist
   // ===========================================================================
   var MODE_META = {
@@ -766,6 +807,7 @@
     renderNowPlaying();
     renderStopBtn();
     renderMixer();
+    renderMonSource();
     renderModes();
     renderGate();
     renderToggles();
@@ -825,6 +867,15 @@
 
     // Stop-all.
     $("stop-all").addEventListener("click", stopAll);
+
+    // Confidence monitor — "What you hear" segmented control.
+    var monSeg = $("monsrc-seg");
+    if (monSeg) {
+      monSeg.addEventListener("click", function (e) {
+        var btn = e.target.closest ? e.target.closest(".seg-btn") : null;
+        if (btn) setMonSource(btn.getAttribute("data-src"));
+      });
+    }
 
     // Gate slider.
     var gate = $("gate");

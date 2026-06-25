@@ -214,6 +214,10 @@ func configuredEngine() *Engine {
 	e.outRing = newRing(ringCapFrames * dspFrame)
 	e.monIn = make([]float32, periodFrames)
 	e.monOut = make([]float32, periodFrames)
+	// Confidence-monitor tap plumbing, allocated exactly as Configure does so the
+	// monitor-tap tests can drive duplexCallback/monitorCallback directly.
+	e.tapRing = newRing(tapRingCapPeriods * periodFrames * channels)
+	e.monTapHold = make([]float32, channels)
 	return e
 }
 

@@ -230,6 +230,10 @@ type AudioState struct {
 	AGC              bool    `json:"agc"`
 	Ducking          bool    `json:"ducking"`
 	ForceThrough     bool    `json:"forceThrough"`
+	// MonitorSource is what the local monitor (the user's headset) plays: "clips"
+	// (default — clean clips only) or "transmitted" (the confidence monitor — the
+	// exact mix sent to the cable, so the user can audit what Discord hears).
+	MonitorSource string `json:"monitorSource"`
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +258,7 @@ func (a *App) GetState() State {
 			Favorites:  []string{},
 			Volumes:    Volumes{Mic: 1, Master: 1, Monitor: 1},
 			PerClip:    map[string]float64{},
-			Audio:      AudioState{MicMode: config.MicModeVAD, GateSensitivity: 0.15},
+			Audio:      AudioState{MicMode: config.MicModeVAD, GateSensitivity: 0.15, MonitorSource: config.MonitorSourceClips},
 		}
 	}
 
@@ -299,6 +303,7 @@ func (a *App) GetState() State {
 		AGC:              s.Processing.AGC,
 		Ducking:          s.Processing.Ducking,
 		ForceThrough:     s.Processing.ForceThrough,
+		MonitorSource:    s.Processing.MonitorSource,
 	}
 	theme := s.Theme
 	if theme == "" {
@@ -518,6 +523,32 @@ func (a *App) SetForceThrough(b bool) {
 		bk.engine.SetForceThrough(b)
 	}
 	bk.settings.Processing.ForceThrough = b
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// SetMonitorSource selects what the local monitor (the user's headset) plays:
+// "clips" (default — clean clips only, you hear your own voice acoustically) or
+// "transmitted" (the confidence monitor — the EXACT mix sent to the cable, so you
+// can audit what Discord receives). It pushes the choice into the engine
+// immediately (atomic/RT-safe) and records it in settings so it persists, mirroring
+// the other audio setters. It NEVER changes what is transmitted to Discord — only
+// what you hear locally for auditing.
+func (a *App) SetMonitorSource(mode string) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	// Normalize unknown values to "clips" so a bad UI value can never leave the
+	// engine in an undefined state or persist garbage.
+	if mode != config.MonitorSourceTransmitted {
+		mode = config.MonitorSourceClips
+	}
+	a.lcMu.Lock()
+	if bk.engine != nil {
+		bk.engine.SetMonitorSource(mode)
+	}
+	bk.settings.Processing.MonitorSource = mode
 	a.lcMu.Unlock()
 	a.persist()
 }

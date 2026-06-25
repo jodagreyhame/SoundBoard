@@ -68,6 +68,20 @@ func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	soundboard := e.duckedMaster()
 
 	e.cursors = mixInto(out[:n], mic, e.cursors, soundboard)
+
+	// CONFIDENCE MONITOR TAP. `out[:n]` now holds the EXACT signal going to the
+	// cable (processedMic + clips) — what Discord receives. When the monitor is in
+	// "transmitted" mode AND actually active (a monitor device is open to consume),
+	// PUSH a copy of that mix into the tap ring so the monitor callback can play it
+	// back. push is non-blocking and allocation-free: if the monitor is momentarily
+	// behind and the ring is full it drops these samples (the monitor will hold-last
+	// over the gap), never blocking the audio thread. Gating on monitorActive keeps
+	// the ring empty in clips-mode or when no monitor is open, so a later enable
+	// starts from the primed lead rather than a stale backlog. The cable write itself
+	// is untouched — tapping is a pure read of `out`.
+	if e.tapRing != nil && e.monitorTransmitting() && e.monitorActive.Load() {
+		e.tapRing.push(out[:n])
+	}
 }
 
 // spliceRampFrames is the length, in frames, of the short linear ramp laid across
