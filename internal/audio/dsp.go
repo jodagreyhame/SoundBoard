@@ -1,16 +1,13 @@
 package audio
 
 // dsp.go holds the mic-path DSP primitives run on the WORKER goroutine (see
-// worker.go): a high-pass filter, an RMS-target AGC leveler, and a VAD/RMS gate;
-// plus the voiced "carrier" oscillator run on the RT thread. Every type here is a
-// plain struct of float state with in-place, allocation-free, lock-free methods so
-// they are safe to drive from the near-real-time worker (and, for the carrier,
-// from the audio callback itself).
+// worker.go): a high-pass filter, an RMS-target AGC leveler, and a VAD/RMS gate.
+// Every type here is a plain struct of float state with in-place, allocation-free,
+// lock-free methods so they are safe to drive from the near-real-time worker.
 //
 // These operate on MONO float32 in normalized [-1,1] at 48kHz. The worker chops
 // the mic stream into exactly denoise.FrameSize (480) sample frames before running
-// HPF -> denoise -> AGC -> gate; the carrier is summed per stereo buffer on the
-// cable path only.
+// HPF -> denoise -> AGC -> gate.
 //
 // All coefficients are derived from the canonical 48kHz sample rate (catalog
 // SampleRate) and the documented time constants. They are computed once at
@@ -288,65 +285,3 @@ func (g *noiseGate) apply(frame []float32, forceOpen, forceClosed bool) float32 
 	g.gain = gg
 	return gg
 }
-
-// --- Voiced carrier ("force through Discord's voice-activity gate") ------------
-
-const (
-	// carrierF0 is the carrier's fundamental (~130 Hz, a low male voiced pitch).
-	carrierF0 = 130.0
-	// carrierPartials is the fixed number of harmonics summed (fundamental + 3).
-	carrierPartials = 4
-	// carrierLevel is the overall carrier amplitude (~-38 dBFS == 10^(-38/20)).
-	// Loud enough to keep Discord's voice-activity gate latched open and to bridge
-	// the gaps between clip onsets, quiet enough to be inaudible under speech.
-	carrierLevel = 0.0126
-)
-
-// carrierAmps are the per-partial amplitudes, formant-shaped so the bed reads as a
-// voiced "ahh" rather than a buzzer: strong fundamental, gently decaying
-// harmonics. Fixed-size so the oscillator never allocates.
-var carrierAmps = [carrierPartials]float32{1.0, 0.5, 0.33, 0.2}
-
-// carrierOsc is a phase-continuous additive oscillator that emits a quiet voiced
-// bed. Phase is kept across buffers (never reset per callback) so there is no
-// discontinuity -> no click at buffer boundaries. It runs on the RT thread and is
-// allocation-free (fixed partial count, no slices grown).
-type carrierOsc struct {
-	phase float64 // fundamental phase in radians, wrapped to [0, 2pi)
-	inc   float64 // per-sample phase increment for the fundamental
-}
-
-// newCarrier builds the oscillator at the canonical sample rate.
-func newCarrier() *carrierOsc {
-	return &carrierOsc{inc: 2 * math.Pi * carrierF0 / fs}
-}
-
-// addInto sums the carrier into an INTERLEAVED stereo buffer (the same value into
-// both channels of each frame), advancing the phase. It is the only DSP that runs
-// on the audio thread besides the cheap gain/mix work, so it is deliberately tiny:
-// a fixed-partial sine sum per frame. Phase continuity across calls is preserved
-// because phase lives on the struct.
-func (o *carrierOsc) addInto(out []float32) {
-	frames := len(out) / channels
-	ph := o.phase
-	for f := 0; f < frames; f++ {
-		var s float64
-		for k := 0; k < carrierPartials; k++ {
-			s += float64(carrierAmps[k]) * math.Sin(ph*float64(k+1))
-		}
-		v := float32(s) * carrierLevel
-		base := f * channels
-		for ch := 0; ch < channels; ch++ {
-			out[base+ch] += v
-		}
-		ph += o.inc
-		if ph >= 2*math.Pi {
-			ph -= 2 * math.Pi
-		}
-	}
-	o.phase = ph
-}
-
-// reset zeroes the carrier phase. Used on stream teardown so a re-enable starts
-// from a known phase (still click-free because it starts from 0 == silence point).
-func (o *carrierOsc) reset() { o.phase = 0 }

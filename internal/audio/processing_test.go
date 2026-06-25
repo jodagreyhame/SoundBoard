@@ -13,7 +13,7 @@ func TestProcessingDefaults(t *testing.T) {
 	if got := e.gateSensitivity(); got != defaultGateSensitivity {
 		t.Errorf("default gateSensitivity = %v, want %v", got, defaultGateSensitivity)
 	}
-	if e.noiseSuppression() || e.agc() || e.ducking() || e.forceThrough() || e.pttIsDown() {
+	if e.noiseSuppression() || e.agc() || e.ducking() || e.pttIsDown() {
 		t.Error("default processing toggles should all be off")
 	}
 	if got := e.GateLevel(); got != 0 {
@@ -82,10 +82,11 @@ func TestProcessingSettersRoundTrip(t *testing.T) {
 	if !e.ducking() {
 		t.Error("SetDucking(true) not reflected")
 	}
+	// SetForceThrough is now an inert no-op (the carrier was removed as part of the
+	// framing-buzz fix). It must remain callable for config/UI compatibility and
+	// must NOT panic or affect any other state.
 	e.SetForceThrough(true)
-	if !e.forceThrough() {
-		t.Error("SetForceThrough(true) not reflected")
-	}
+	e.SetForceThrough(false)
 	e.SetPTTDown(true)
 	if !e.pttIsDown() {
 		t.Error("SetPTTDown(true) not reflected")

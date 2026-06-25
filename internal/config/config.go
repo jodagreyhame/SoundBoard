@@ -99,8 +99,11 @@ type AudioProcessing struct {
 	// requires a louder voice to open. normalize() defaults 0 to ~0.15 and clamps
 	// to [0,1].
 	GateSensitivity float32 `json:"gateSensitivity,omitempty"`
-	// ForceThrough enables the continuous voiced "carrier" bed added to the CABLE
-	// path only, to keep Discord's voice-activity gate latched open. Default off.
+	// ForceThrough is a RETAINED-BUT-INERT setting. It formerly enabled a continuous
+	// voiced "carrier" bed on the CABLE path to hold Discord's voice-activity gate
+	// open; that carrier was a static tone (a buzz by construction) and has been
+	// removed from the audio engine. The field is kept so existing saved settings
+	// round-trip without error, but the engine ignores it. Default off.
 	ForceThrough bool `json:"forceThrough,omitempty"`
 	// PTTHotkey is the combo (e.g. "ctrl+grave") that opens the mic in "ptt" mode.
 	// Empty means no PTT binding is registered. Parsed by internal/hotkeys.

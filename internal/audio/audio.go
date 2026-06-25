@@ -189,7 +189,6 @@ type Engine struct {
 	noiseSuppressOn atomic.Bool   // run RNNoise on the mic when true
 	agcOn           atomic.Bool   // run the RMS-target leveler when true
 	duckingOn       atomic.Bool   // duck clips under an open mic gate when true
-	forceThroughOn  atomic.Bool   // emit the voiced carrier on the cable when true
 	gateLevelBits   atomic.Uint32 // published gate-open level float32 bits, [0,1]
 
 	// pending / monPending hand clips from Trigger to the RT callbacks. Each
@@ -220,11 +219,8 @@ type Engine struct {
 	monIn  []float32
 	monOut []float32
 
-	// carrier is the phase-continuous voiced bed added to the CABLE output only
-	// when ForceThrough is on. Owned by the duplex callback (phase advances there);
-	// allocated in Configure. duckEnv is the duplex callback's ducking envelope
-	// follower (clip<->mic cross-gain), also callback-owned.
-	carrier *carrierOsc
+	// duckEnv is the duplex callback's ducking envelope follower (clip<->mic
+	// cross-gain), callback-owned (advanced once per buffer in duckedMaster).
 	duckEnv float32
 }
 
@@ -335,7 +331,6 @@ func (e *Engine) Configure(mic devices.Device, cable devices.Device) error {
 	e.outRing = newRing(ringCapFrames * dspFrame)
 	e.monIn = make([]float32, periodFrames)
 	e.monOut = make([]float32, periodFrames)
-	e.carrier = newCarrier()
 	e.duckEnv = 0
 
 	cfg := malgo.DefaultDeviceConfig(malgo.Duplex)
@@ -460,6 +455,20 @@ func (e *Engine) Start() error {
 	}
 	if e.outRing != nil {
 		e.outRing.reset()
+		// PRIME the output ring with exactly one DSP frame (480 mono samples) of
+		// silence so the worker starts one full frame AHEAD of the callback. Without
+		// this, the duplex callback consumes the output ring in 192-sample periods
+		// while the worker only ever refills it in whole 480-sample bursts, so the
+		// available count beats against LCM(192,480)=960: once every 960 samples it
+		// dips below 192 and outRing.pull returns a PARTIAL frame. That partial pull
+		// fires the underrun seam at 48000/960 = 50 Hz — the audible buzz on the
+		// cable. Holding 480 zero samples of headroom means available never drops
+		// below 192 in steady state (480 - 192 = 288 > 0 across any single period),
+		// so the 50 Hz underrun-splice can no longer fire. The prefill is pure
+		// silence: it adds ~10 ms of latency and is inaudible. Use the real ring
+		// push API (off the audio thread, under ctrlMu, no callback running).
+		var prime [dspFrame]float32
+		e.outRing.push(prime[:])
 	}
 	e.startWorker()
 

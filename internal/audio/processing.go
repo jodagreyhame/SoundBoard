@@ -101,13 +101,16 @@ func (e *Engine) SetDucking(on bool) { e.duckingOn.Store(on) }
 // ducking reads the ducking toggle lock-free (RT path helper).
 func (e *Engine) ducking() bool { return e.duckingOn.Load() }
 
-// SetForceThrough toggles the continuous voiced "carrier" bed added to the CABLE
-// path only (never the monitor) to keep Discord's voice-activity gate latched
-// open. Safe from any goroutine.
-func (e *Engine) SetForceThrough(on bool) { e.forceThroughOn.Store(on) }
-
-// forceThrough reads the carrier toggle lock-free (RT path helper).
-func (e *Engine) forceThrough() bool { return e.forceThroughOn.Load() }
+// SetForceThrough is retained as an INERT no-op for API/config/UI compatibility.
+//
+// It previously enabled a continuous voiced "carrier" bed on the CABLE path to hold
+// Discord's voice-activity gate open. That carrier was a buzz BY CONSTRUCTION (a
+// static ~130 Hz voiced tone) and has been removed from the engine entirely as part
+// of the framing-buzz fix. The setter stays so the saved config field, Wails
+// bindings, and the Fyne "Force through" toggle continue to compile and round-trip;
+// the engine simply ignores the value and never emits a carrier. Safe from any
+// goroutine.
+func (e *Engine) SetForceThrough(bool) {}
 
 // GateLevel returns the current mic-gate open level in [0,1] for the UI's
 // mic-open meter: 0 = fully closed (silent), 1 = fully open. The DSP worker

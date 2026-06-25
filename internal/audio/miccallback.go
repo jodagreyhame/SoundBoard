@@ -19,12 +19,11 @@ package audio
 //     back to the (gained) mic passthrough for the missing samples and NEVER
 //     blocks — then UPMIXES the processed mono back over the stereo mic view,
 //  5. mixes the clips on top via mixInto, scaling them by the MASTER gain reduced
-//     by the DUCKING envelope when the mic gate is open,
-//  6. adds the voiced CARRIER to the cable output only when ForceThrough is on.
+//     by the DUCKING envelope when the mic gate is open.
 //
-// Every control (gains, ducking, forceThrough, gate level) is read once here via a
-// single atomic load. monitorCallback is deliberately untouched: the monitor path
-// plays clips only — no mic, no gate, no denoise, no carrier.
+// Every control (gains, ducking, gate level) is read once here via a single atomic
+// load. monitorCallback is deliberately untouched: the monitor path plays clips
+// only — no mic, no gate, no denoise.
 func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	e.cursors = drainInto(e.pending, e.cursors)
 	e.cursors = clearOnStop(&e.stopFlag, e.cursors, e.pending)
@@ -69,31 +68,15 @@ func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	soundboard := e.duckedMaster()
 
 	e.cursors = mixInto(out[:n], mic, e.cursors, soundboard)
-
-	// Add the voiced carrier to the CABLE output only (never the monitor) to keep
-	// Discord's voice-activity gate latched open. Phase is continuous across buffers
-	// because it lives on e.carrier. Re-clamp after, since the carrier sums on top
-	// of an already-clamped buffer.
-	if e.carrier != nil && e.forceThrough() {
-		e.carrier.addInto(out[:n])
-		for i := 0; i < n; i++ {
-			if out[i] > 1 {
-				out[i] = 1
-			} else if out[i] < -1 {
-				out[i] = -1
-			}
-		}
-	}
 }
 
-// spliceRampFrames is the length, in frames, of the short linear cross-fade laid
-// across a PARTIAL-underrun seam (see processMicThroughWorker). At the boundary
-// frame `got` the worker's PROCESSED mono (often ramping toward silence while the
-// gate is closing) meets the tail (raw mic passthrough, or silence when muted);
-// blending the last processed value into the tail over a few frames removes the
-// instantaneous amplitude discontinuity that would otherwise click/pop. ~16 frames
-// (~0.33ms at 48kHz) is long enough to be inaudible as a transient yet far shorter
-// than a period, so it never masks real audio.
+// spliceRampFrames is the length, in frames, of the short linear ramp laid across
+// a PARTIAL-underrun seam (see processMicThroughWorker). At the boundary frame
+// `got` the worker's PROCESSED mono ends; rather than splice the RAW (full-level)
+// mic tail in after it — which collides processed-vs-raw levels and is the original
+// 50 Hz buzz mechanism — we HOLD the last processed value and zero-ramp it down to
+// silence over this many frames. ~16 frames (~0.33ms at 48kHz) is long enough to be
+// click-free yet far shorter than a period, so it never masks real audio.
 const spliceRampFrames = 16
 
 // processMicThroughWorker downmixes the gained stereo mic to mono, hands it to the
@@ -105,14 +88,17 @@ const spliceRampFrames = 16
 // timing, so the underrun tail is zeroed rather than passed through — mute does not
 // depend on the worker keeping up.
 //
-// On PARTIAL underrun (0 < got < frames) the head is the worker's processed mono
-// and the tail is the fallback (raw mic, or silence when forceClosed). Those two
-// regions can meet at very different instantaneous levels — the processed head is
-// frequently ramping toward silence as the gate closes — so a hard cut there clicks.
-// We cross-fade the last processed sample into the tail over spliceRampFrames so the
-// seam is continuous. On FULL underrun (got == 0) there is no processed sample to
-// fade from, so the documented behavior stands: raw passthrough for the whole buffer
-// (added latency, never a stall), or silence when forceClosed.
+// On PARTIAL underrun (0 < got < frames) the head is the worker's processed mono.
+// The tail is NOT spliced to the raw mic: that would collide the processed level
+// against the full-level live mic and, because such partial pulls recur on the
+// LCM(192,480)=960-sample beat, modulate the seam at 48000/960 = 50 Hz — the buzz.
+// Instead we HOLD the last processed sample and zero-ramp it down to silence over
+// spliceRampFrames, then stay silent for the rest of the tail. This keeps the seam
+// click-free AND removes the processed-vs-raw collision even if a dip slips through
+// (e.g. before the output-ring prime takes effect). On FULL underrun (got == 0)
+// there is no processed sample to hold from, so the documented fallback stands: raw
+// mic passthrough for the whole buffer (added latency, never a stall), or silence
+// when forceClosed. When forceClosed, the tail is always silent regardless.
 //
 // All buffers are preallocated; this is allocation- and lock-free.
 func (e *Engine) processMicThroughWorker(mic []float32, frames int, forceClosed bool) {
@@ -147,43 +133,41 @@ func (e *Engine) processMicThroughWorker(mic []float32, frames int, forceClosed 
 		return
 	}
 
-	// The processed value at the seam (the last sample the worker produced). When
-	// the worker produced nothing this buffer (full underrun) there is no processed
-	// level to fade from, so we just write the fallback tail directly.
-	var seam float32
-	haveSeam := got > 0
-	if haveSeam {
-		seam = e.monOut[got-1]
-	}
-
-	for f := got; f < frames; f++ {
-		// Fallback target for this tail sample: raw mic passthrough, or silence when
-		// the gate is force-closed (mute / PTT-up) so muting is authoritative here.
-		base := f * channels
-		var target float32
-		if !forceClosed {
-			// Average the channels so the cross-fade math is on a single mono target;
-			// it is written back to both channels below.
-			var sum float32
-			for ch := 0; ch < channels; ch++ {
-				sum += mic[base+ch]
-			}
-			target = sum / float32(channels)
-		}
-
-		v := target
-		if haveSeam {
-			// Linear cross-fade from the seam value toward the fallback target over
-			// spliceRampFrames; after the ramp, the tail is the pure fallback.
+	// PARTIAL underrun with a processed head (0 < got < frames): HOLD the last
+	// processed sample and zero-ramp it down to silence over spliceRampFrames, then
+	// stay silent. We deliberately do NOT splice the raw mic tail in — that level
+	// collision recurring on the 960-sample beat is the 50 Hz buzz. Holding-and-
+	// ramping the processed seam toward silence is click-free and leaks no raw mic.
+	if got > 0 {
+		seam := e.monOut[got-1]
+		for f := got; f < frames; f++ {
+			var v float32
 			if step := f - got; step < spliceRampFrames {
+				// Linear ramp from the seam value down to silence.
 				a := float32(step+1) / float32(spliceRampFrames)
-				v = seam*(1-a) + target*a
+				v = seam * (1 - a)
+			}
+			base := f * channels
+			for ch := 0; ch < channels; ch++ {
+				mic[base+ch] = v
 			}
 		}
-		for ch := 0; ch < channels; ch++ {
-			mic[base+ch] = v
+		return
+	}
+
+	// FULL underrun (got == 0): no processed sample to hold from. Documented
+	// fallback — raw mic passthrough for the whole buffer (added latency, never a
+	// stall), or silence when force-closed so mute stays authoritative.
+	if forceClosed {
+		for f := 0; f < frames; f++ {
+			base := f * channels
+			for ch := 0; ch < channels; ch++ {
+				mic[base+ch] = 0
+			}
 		}
 	}
+	// When not force-closed, the mic view already holds the gained raw passthrough,
+	// so there is nothing to write.
 }
 
 // micForceClosed reports whether the live mic must be silenced to the cable on this

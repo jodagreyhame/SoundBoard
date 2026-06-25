@@ -30,9 +30,12 @@ const (
 		"before it reaches Discord. Soundboard clips are never processed. " +
 		"Leave Discord's own noise suppression OFF."
 
-	// forceCaption explains the carrier toggle's narrow purpose.
-	forceCaption = "Adds an inaudible voiced tone so Discord's voice-activity gate " +
-		"stays open and clip onsets are not clipped. Does not defeat Krisp."
+	// forceCaption explains that the former carrier toggle is now inert. The voiced
+	// "carrier" tone it controlled was removed from the engine (it was a buzz by
+	// construction); the toggle is retained only so existing layouts/settings stay
+	// valid. Toggling it has no audio effect.
+	forceCaption = "Inactive. The voiced-carrier tone this toggled has been removed; " +
+		"this control no longer affects audio."
 
 	// gateMeterCaption labels the live indicator.
 	gateMeterCaption = "Mic open"

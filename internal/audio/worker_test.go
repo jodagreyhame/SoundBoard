@@ -202,25 +202,24 @@ func TestWorkerGoroutineRoundTrip(t *testing.T) {
 	}
 }
 
-// --- Duplex callback integration: carrier + underrun ---------------------------
+// --- Duplex callback integration: no-carrier + underrun ------------------------
 
-// configuredEngine builds an engine with the rings/scratch/carrier allocated as
-// Configure would, but WITHOUT a real device or worker goroutine, so duplexCallback
-// can be driven directly in a test.
+// configuredEngine builds an engine with the rings/scratch allocated as Configure
+// would, but WITHOUT a real device or worker goroutine, so duplexCallback can be
+// driven directly in a test. The voiced carrier was removed (framing-buzz fix), so
+// there is nothing carrier-shaped to allocate here.
 func configuredEngine() *Engine {
 	e := NewEngine(nil, nil)
 	e.inRing = newRing(ringCapFrames * dspFrame)
 	e.outRing = newRing(ringCapFrames * dspFrame)
 	e.monIn = make([]float32, periodFrames)
 	e.monOut = make([]float32, periodFrames)
-	e.carrier = newCarrier()
 	return e
 }
 
-// TestCarrierAbsentWhenForceThroughOff confirms the carrier is NOT added to the
-// cable output when ForceThrough is off: with a silent mic and no clips the output
-// is pure silence.
-func TestCarrierAbsentWhenForceThroughOff(t *testing.T) {
+// TestNoCarrierWhenForceThroughOff confirms that with a silent mic and no clips the
+// cable output is pure silence when ForceThrough is off.
+func TestNoCarrierWhenForceThroughOff(t *testing.T) {
 	e := configuredEngine()
 	e.SetForceThrough(false)
 
@@ -235,10 +234,12 @@ func TestCarrierAbsentWhenForceThroughOff(t *testing.T) {
 	}
 }
 
-// TestCarrierPresentWhenForceThroughOn confirms the carrier IS added to the cable
-// output when ForceThrough is on (silent mic, no clips -> the only thing present is
-// the carrier bed, which must be non-zero).
-func TestCarrierPresentWhenForceThroughOn(t *testing.T) {
+// TestForceThroughIsInert confirms SetForceThrough(true) is now a NO-OP: the static
+// voiced carrier (a buzz by construction) was removed, so enabling ForceThrough must
+// NOT add any tone to the cable. With a silent mic and no clips the output stays
+// pure silence regardless of the toggle. This is the regression guarding against the
+// carrier ever coming back.
+func TestForceThroughIsInert(t *testing.T) {
 	e := configuredEngine()
 	e.SetForceThrough(true)
 
@@ -246,25 +247,10 @@ func TestCarrierPresentWhenForceThroughOn(t *testing.T) {
 	mic := make([]byte, periodFrames*channels*4) // silent mic
 	e.duplexCallback(out, mic, periodFrames)
 
-	nonZero := false
-	var peak float32
-	for _, s := range bytesAsF32(out) {
+	for i, s := range bytesAsF32(out) {
 		if s != 0 {
-			nonZero = true
+			t.Fatalf("ForceThrough must be inert: cable sample %d should be silent, got %v", i, s)
 		}
-		a := s
-		if a < 0 {
-			a = -a
-		}
-		if a > peak {
-			peak = a
-		}
-	}
-	if !nonZero {
-		t.Fatal("ForceThrough on: carrier should make the cable output non-silent")
-	}
-	if peak > 0.2 {
-		t.Fatalf("carrier bed too loud on the cable: peak %v", peak)
 	}
 }
 
@@ -343,14 +329,17 @@ func TestDuplexPTTUpSilencesOnUnderrun(t *testing.T) {
 	}
 }
 
-// TestDuplexPartialUnderrunSeamIsContinuous confirms the partial-underrun splice is
-// cross-faded, not hard-cut: we pre-load the output ring with a small run of a
-// constant processed value (so got < frames), then assert the boundary between the
-// processed head and the passthrough tail has no large instantaneous jump. This is
-// the regression for the "audible splice/click on partial underrun" fix.
+// TestDuplexPartialUnderrunSeamIsContinuous confirms the partial-underrun tail is a
+// HOLD-LAST zero-ramp, not a splice into the raw mic: we pre-load the output ring
+// with a small run of a constant processed value (so got < frames), drive a loud
+// raw mic, and assert (a) the seam has no large instantaneous jump, (b) the raw mic
+// NEVER appears in the tail (no processed-vs-raw collision), and (c) the tail ends
+// at silence. This is the regression for the 50 Hz framing buzz: the old code
+// cross-faded into the full-level raw mic, which on the 960-sample beat modulated
+// the cable at 50 Hz.
 func TestDuplexPartialUnderrunSeamIsContinuous(t *testing.T) {
 	e := configuredEngine()
-	e.SetMicMode("vad") // not force-closed: the tail is raw mic passthrough
+	e.SetMicMode("vad") // not force-closed
 
 	// Pre-load the output ring with `got` processed samples at a level FAR from the
 	// raw mic, so a hard cut would produce a large step at the seam.
@@ -375,8 +364,7 @@ func TestDuplexPartialUnderrunSeamIsContinuous(t *testing.T) {
 
 	// Inspect the per-frame mono level (both channels equal here) and find the
 	// largest sample-to-sample jump across the whole buffer. A hard cut would jump
-	// |processed - rawMic| = 1.0 at the seam; the cross-fade must keep every step
-	// well under that.
+	// |processed| = 0.5 at the seam; the hold-last ramp keeps every step well under.
 	got32 := bytesAsF32(out)
 	var maxJump float32
 	for f := 1; f < periodFrames; f++ {
@@ -388,18 +376,29 @@ func TestDuplexPartialUnderrunSeamIsContinuous(t *testing.T) {
 			maxJump = d
 		}
 	}
-	// With a 16-frame ramp over a 1.0 span the per-step delta is ~1/16 ≈ 0.0625.
-	// Allow generous headroom but stay far below the hard-cut 1.0.
+	// With a 16-frame ramp over a 0.5 span the per-step delta is ~0.5/16 ≈ 0.031.
 	if maxJump > 0.2 {
-		t.Fatalf("partial-underrun seam jump = %v, want a smooth cross-fade (<=0.2, hard cut would be ~1.0)", maxJump)
+		t.Fatalf("partial-underrun seam jump = %v, want a smooth hold-last ramp (<=0.2, hard cut would be ~0.5)", maxJump)
 	}
-	// Sanity: the head really was the processed value and the tail really reached
-	// the raw mic (the fade completed), so we tested the actual splice.
+	// The head really was the processed value.
 	if !approx(got32[0], processed) {
 		t.Fatalf("processed head not applied: out[0] = %v, want %v", got32[0], processed)
 	}
-	if !approx(got32[(periodFrames-1)*channels], rawMic) {
-		t.Fatalf("tail did not reach raw mic passthrough: last = %v, want %v", got32[(periodFrames-1)*channels], rawMic)
+	// The raw mic must NEVER leak into the tail — that collision is the buzz. Every
+	// tail sample must lie within [min(seam,0), max(seam,0)] (the ramp toward
+	// silence), and in particular never reach the positive raw-mic level.
+	for f := got; f < periodFrames; f++ {
+		s := got32[f*channels]
+		if s > 1e-4 {
+			t.Fatalf("tail sample %d = %v leaked the raw mic (must hold-last toward silence, never go positive)", f, s)
+		}
+		if s < processed-1e-4 {
+			t.Fatalf("tail sample %d = %v overshot below the seam level %v", f, s, processed)
+		}
+	}
+	// And the tail ends fully at silence (the ramp completed well before buffer end).
+	if last := got32[(periodFrames-1)*channels]; !approx(last, 0) {
+		t.Fatalf("tail did not reach silence: last = %v, want 0", last)
 	}
 }
 
