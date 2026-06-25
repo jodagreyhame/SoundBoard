@@ -132,16 +132,28 @@ func loadDLL() {
 	loadedDLL = p
 }
 
+// gcAdaptiveDigital is webrtc_apm_gc_mode WEBRTC_APM_GC_ADAPTIVE_DIGITAL: the
+// GainController1 mode that applies an adaptive digital gain (level a quiet talker
+// up, tame a loud one) WITHOUT needing analog-HAL coupling. This is the gain path
+// Discord's voice config uses and the one the validated apmspike SmokeTest drives.
+const gcAdaptiveDigital = 1
+
 // applyConfig builds a fresh native config struct from cfg, sets every submodule
 // toggle, and applies it to apmPtr, returning the apply rc (0 == success). It is
 // shared by New (first apply) and Reconfigure (runtime NS/AGC flips) so the exact
 // Discord mapping lives in one place.
 //
-// Gain control is the DISCORD shape: AGC2 (gain_controller2) is the
-// adaptive-digital + limiter path Discord uses, so GainControlEnabled drives
-// gain_controller2 and gain_controller1 is forced OFF — stacking AGC1 and AGC2 is
-// wrong. Every sub-value (headroom, max gain, limiter, NS analysis) is left at the
-// WebRTC library default, per "accept library defaults — do not invent sub-values".
+// Gain control is the DISCORD shape: GainController1 in ADAPTIVE-DIGITAL mode. The
+// C ABI's set_gain_controller2 takes only the top-level `enabled` bit — it does NOT
+// (and cannot) enable gain_controller2.adaptive_digital or its input-volume
+// controller, both of which default to false in the WebRTC config — so driving GC2
+// alone applies NO adaptive gain (a dead toggle: a quiet talker stays quiet). GC1's
+// setter exposes the full (enabled, mode, target_dbfs, comp_gain_db, limiter) shape,
+// so GainControlEnabled drives gain_controller1 in adaptive-digital mode (the path
+// Discord uses and apmspike.SmokeTest proves boosts a quiet signal) and
+// gain_controller2 is forced OFF so the two never stack. The sub-values mirror the
+// validated spike (target 0 dBFS, 9 dB compression, limiter on) — library-default
+// shaped, not invented.
 func applyConfig(p *dllProcs, apmPtr uintptr, cfg Config) int32 {
 	cfgPtr, _, _ := p.cfgCreate.Call()
 	if cfgPtr == 0 {
@@ -151,10 +163,13 @@ func applyConfig(p *dllProcs, apmPtr uintptr, cfg Config) int32 {
 
 	p.cfgHPF.Call(cfgPtr, b2u(cfg.HighPassFilterEnabled))
 	p.cfgNS.Call(cfgPtr, b2u(cfg.NoiseSuppressionEnabled), uintptr(cfg.NoiseSuppressionLevel))
-	p.cfgGC2.Call(cfgPtr, b2u(cfg.GainControlEnabled))
-	// gain_controller1 explicitly OFF so AGC1 and AGC2 never stack. Signature:
-	// (cfg, enabled, mode, target_dbfs, comp_gain_db, limiter).
-	p.cfgGC1.Call(cfgPtr, 0, 0, 0, 9, 1)
+	// GainController1, adaptive-digital — the ACTUAL working AGC. Signature:
+	// (cfg, enabled, mode, target_dbfs, comp_gain_db, limiter). This is exactly what
+	// the apmspike.SmokeTest applies and is verified to level a quiet talker up.
+	p.cfgGC1.Call(cfgPtr, b2u(cfg.GainControlEnabled), uintptr(gcAdaptiveDigital), 0, 9, 1)
+	// gain_controller2 explicitly OFF so AGC1 and AGC2 never stack (and because GC2's
+	// C ABI cannot turn on its adaptive-digital sub-controller anyway).
+	p.cfgGC2.Call(cfgPtr, 0)
 	p.cfgAEC.Call(cfgPtr, b2u(cfg.EchoCancellationEnabled), 0)
 
 	rc, _, _ := p.applyCfg.Call(apmPtr, cfgPtr)

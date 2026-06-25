@@ -51,7 +51,7 @@ const (
 //
 //	HighPassFilterEnabled: true
 //	NoiseSuppressionEnabled: true, NoiseSuppressionLevel: NSLevelModerate
-//	GainControlEnabled: true   (AGC2 adaptive-digital + limiter, library defaults)
+//	GainControlEnabled: true   (GainController1 adaptive-digital + limiter)
 //	EchoCancellationEnabled: false  (server-side mix; no far-end render reference)
 //	CaptureChannels: 1, RenderChannels: 1
 //

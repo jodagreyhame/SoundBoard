@@ -86,13 +86,65 @@ func TestProcessorRoundTrip(t *testing.T) {
 	t.Logf("APM round-trip ok: inEnergy=%.4f outEnergy=%.4f", inEnergy, outEnergy)
 }
 
+// TestGainControlBoostsQuietInput is the behavioral guard for the AGC toggle. The
+// production "AGC" maps to GainControlEnabled; with the working GainController1
+// adaptive-digital path (the fix), driving a QUIET voiced signal with gain control
+// ON must raise the output RMS well above the same signal processed with gain
+// control OFF. The previous GC2-only wiring was a DEAD toggle (on == off, ~1.00x),
+// so this test would have failed against it — it can never silently regress again.
+// Skipped when the APM is unavailable (non-Windows / DLL missing).
+func TestGainControlBoostsQuietInput(t *testing.T) {
+	if !Available() {
+		t.Skip("APM unavailable in this build")
+	}
+	// Run a quiet (~-26 dBFS) voiced sine through the APM with NS off (isolate gain)
+	// and report the steady-state output RMS after the adaptive gain has settled.
+	run := func(agcOn bool) float32 {
+		c := DiscordConfig()
+		c.NoiseSuppressionEnabled = false // isolate gain control from NS
+		c.GainControlEnabled = agcOn
+		p, err := New(c)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		defer p.Close()
+		const amp = 0.05 // ~-26 dBFS, a quiet talker the AGC should lift
+		const freq = 220.0
+		phase := 0.0
+		const dphase = 2 * math.Pi * freq / float64(SampleRate)
+		var last float32
+		for i := 0; i < 400; i++ { // ~4s so the adaptive-digital gain fully ramps
+			f := make([]float32, FrameSize)
+			for j := range f {
+				f[j] = float32(amp * math.Sin(phase))
+				phase += dphase
+			}
+			p.ProcessCapture(f)
+			var s float64
+			for _, v := range f {
+				s += float64(v) * float64(v)
+			}
+			last = float32(math.Sqrt(s / float64(len(f))))
+		}
+		return last
+	}
+	off := run(false)
+	on := run(true)
+	// The adaptive-digital gain must lift the quiet input meaningfully (require at
+	// least 1.5x; the spike measures ~3.2x). A dead toggle (on ~= off) fails here.
+	if on <= off*1.5 {
+		t.Fatalf("AGC on should boost a quiet input >=1.5x over AGC off: on=%v off=%v (ratio %.2fx)", on, off, on/off)
+	}
+	t.Logf("AGC quiet-input boost ok: off=%v on=%v (%.2fx)", off, on, on/off)
+}
+
 // TestNoiseSuppressionAttenuatesNoise confirms the APM's noise suppression actually
 // reduces broadband noise when enabled: feeding white noise with NS on yields a far
 // lower output RMS than with NS off. This is the behavioral proof that the Discord NS
-// submodule is wired and the UI's "Noise suppression" toggle has real effect. (Note:
-// the AGC2 gain controller is VAD-gated and does not boost synthetic tones, which is
-// correct WebRTC behavior — gain control is exercised by ProcessorRoundTrip, not by a
-// brittle synthetic-boost assertion.) Skipped when the APM is unavailable.
+// submodule is wired and the UI's "Noise suppression" toggle has real effect. Gain
+// control is isolated OFF here so the NS effect is measured alone; the AGC boost is
+// proven separately by TestGainControlBoostsQuietInput. Skipped when the APM is
+// unavailable.
 func TestNoiseSuppressionAttenuatesNoise(t *testing.T) {
 	if !Available() {
 		t.Skip("APM unavailable in this build")

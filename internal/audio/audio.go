@@ -531,6 +531,25 @@ func (e *Engine) SetMonitor(dev *devices.Device) error {
 	}
 	e.monitorDev = mdev
 
+	// Reset and re-prime the confidence-monitor tap ring on EVERY runtime enable,
+	// exactly as Start does, so the documented anti-race invariant holds when the
+	// monitor is toggled OFF then back ON (a path SetMonitor explicitly supports
+	// below while e.started). Two things would otherwise break in "transmitted"
+	// mode: (1) without the one-period prime the monitor's pull and the duplex's
+	// push race frame-for-frame with zero lead, firing the underrun seam on any
+	// scheduling jitter (audible micro-dropouts the prime exists to prevent); and
+	// (2) the tap ring is NOT drained while the monitor is off (the duplex tap is
+	// gated on monitorActive at miccallback.go), so any cable mix left from a prior
+	// enabled period would be replayed as stale audio when the new monitor starts
+	// draining. Reset clears that backlog; primeTapRing restores the one-period lead.
+	//
+	// This runs under ctrlMu with monitorActive still false (so the duplex tap is
+	// gated off and is not pushing) and BEFORE the new monitor device is started (so
+	// its callback is not yet draining) — the same "no callback concurrently touches
+	// the ring" safety conditions Start's reset/prime rely on. In "clips" mode it is
+	// harmless: the ring just holds idle silence the monitor never drains.
+	e.resetAndPrimeTapRing()
+
 	// Match the duplex device's running state so toggling at runtime works.
 	if e.started {
 		if err := mdev.Start(); err != nil {
@@ -588,6 +607,23 @@ func (e *Engine) primeTapRing() {
 	e.tapRing.push(prime[:])
 }
 
+// resetAndPrimeTapRing clears any buffered cable mix from the confidence-monitor tap
+// ring and re-establishes the one-period silence lead. It is the exact sequence both
+// Start (initial activation) and SetMonitor (runtime re-enable) need so the monitor's
+// pull never races the duplex's push frame-for-frame and no stale backlog is replayed
+// on enable. A nil tap ring (engine never Configured) is a safe no-op via the inner
+// nil checks. It MUST be called only with no callback concurrently draining/pushing
+// the ring (under ctrlMu, monitor not yet active) — the same conditions reset/prime
+// already rely on. Factored out so both call sites share one definition and the
+// re-enable invariant is directly exercised by the regression suite.
+func (e *Engine) resetAndPrimeTapRing() {
+	if e.tapRing == nil {
+		return
+	}
+	e.tapRing.reset()
+	e.primeTapRing()
+}
+
 // Start activates all configured devices.
 func (e *Engine) Start() error {
 	e.ctrlMu.Lock()
@@ -618,14 +654,12 @@ func (e *Engine) Start() error {
 		// restart begins from empty, then prime exactly one frame of headroom.
 		e.primeOutputRing()
 	}
-	if e.tapRing != nil {
-		// Reset then prime the confidence-monitor tap ring with one period of silence
-		// so the monitor device (independent clock) starts a full period behind the
-		// duplex tap and never races it frame-for-frame. See primeTapRing. Harmless in
-		// "clips" mode: the ring just holds idle silence the monitor never drains.
-		e.tapRing.reset()
-		e.primeTapRing()
-	}
+	// Reset then prime the confidence-monitor tap ring with one period of silence so
+	// the monitor device (independent clock) starts a full period behind the duplex
+	// tap and never races it frame-for-frame. See resetAndPrimeTapRing / primeTapRing.
+	// Harmless in "clips" mode: the ring just holds idle silence the monitor never
+	// drains. SetMonitor's runtime re-enable shares this exact sequence.
+	e.resetAndPrimeTapRing()
 	e.startWorker()
 
 	if err := e.duplexDev.Start(); err != nil {

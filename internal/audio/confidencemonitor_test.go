@@ -100,6 +100,60 @@ func TestPrimeTapRingNilSafe(t *testing.T) {
 	e.primeTapRing() // must not panic
 }
 
+// TestMonitorReEnableResetsAndPrimesTapRing is the regression guard for the runtime
+// monitor toggle (SetMonitor while started, in "transmitted" mode). When the monitor
+// is turned OFF the duplex tap is gated off (monitorActive false) so the tap ring is
+// no longer drained; a re-enable must therefore (1) CLEAR any stale cable mix left in
+// the ring from the prior enabled period, and (2) RESTORE the one-period silence lead
+// so the monitor's pull does not race the duplex's push frame-for-frame. SetMonitor
+// runs e.resetAndPrimeTapRing() before re-activating; this drives that exact sequence
+// hardware-free (no malgo device) after deliberately leaving the ring in the bad
+// post-toggle state (stale data, zero lead) and asserts it ends primed and clean.
+//
+// Against the pre-fix SetMonitor (which neither reset nor primed) the ring would
+// still hold the stale partial backlog and have NO lead — exactly the two failures
+// the finding called out — so this test would be red.
+func TestMonitorReEnableResetsAndPrimesTapRing(t *testing.T) {
+	e := configuredEngine()
+	e.SetMonitorSource(MonitorSourceTransmitted)
+
+	// Simulate the state left behind after the monitor ran, then was toggled OFF: a
+	// stale, sub-period chunk of cable mix sits undrained in the tap ring (the duplex
+	// tap is gated on monitorActive, which is now false, so nothing clears it).
+	const staleFrames = 5 // a partial period, like a real mid-period backlog
+	stale := make([]float32, staleFrames*channels)
+	for i := range stale {
+		stale[i] = 0.7 // non-silent so a replay would be audibly stale
+	}
+	if n := e.tapRing.push(stale); n != len(stale) {
+		t.Fatalf("precondition: failed to seed stale backlog, pushed %d of %d", n, len(stale))
+	}
+	if avail := e.tapRing.length(); avail != len(stale) {
+		t.Fatalf("precondition: tap ring should hold the stale backlog, got %d", avail)
+	}
+
+	// Re-enable path: SetMonitor calls exactly this before flipping monitorActive on.
+	e.resetAndPrimeTapRing()
+
+	// The ring must now hold EXACTLY one period of lead — the stale backlog gone, the
+	// prime restored (not stale+prime appended).
+	wantLen := periodFrames * channels
+	if avail := e.tapRing.length(); avail != wantLen {
+		t.Fatalf("after re-enable the tap ring must hold exactly one primed period: got %d, want %d", avail, wantLen)
+	}
+
+	// And every sample of that lead must be silence — no stale 0.7s survived the reset.
+	out := make([]float32, wantLen)
+	if n := e.tapRing.pull(out); n != wantLen {
+		t.Fatalf("expected to pull one full primed period, got %d", n)
+	}
+	for i, s := range out {
+		if s != 0 {
+			t.Fatalf("re-enable lead must be pure silence (stale backlog cleared): sample %d = %v", i, s)
+		}
+	}
+}
+
 // TestClipsModeDoesNotTap confirms that in the DEFAULT clips mode the duplex
 // callback does NOT push anything into the tap ring — the confidence-monitor path
 // is fully idle, so clips mode keeps its exact historical behavior and the ring
