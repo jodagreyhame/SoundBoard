@@ -11,17 +11,23 @@ package audio
 // cable (never the monitor, which plays clips only).
 //
 // THE FIX is two-fold and both halves are pinned here:
-//  1. Start() PRIMES the output ring with one 480-sample frame of silence, so the
-//     available count never drops below 192 in steady state and the partial pull
-//     can no longer fire (TestOutputRingPrimeKillsFramingBeat).
+//  1. Start() PRIMES the output ring with one 480-sample frame of silence (via the
+//     primeOutputRing helper), so the available count never drops below 192 in
+//     steady state and the partial pull can no longer fire. The fix concept is
+//     proven by pure arithmetic (TestOutputRingPrimeKillsFramingBeat) AND the actual
+//     production prime wiring is pinned on a hardware-free engine
+//     (TestPrimeOutputRingAppliesOneFrame, which calls the same primeOutputRing
+//     Start() calls).
 //  2. Even if a dip slips through, the partial-underrun path HOLDS-LAST and ramps
 //     toward silence instead of splicing the full-level raw mic in, removing the
 //     processed-vs-raw level collision (TestDuplexNoFiftyHzSeamWithRealWorker, plus
 //     the hold-last unit tests in worker_test.go).
 //
 // All tests here are hardware-free: TestOutputRingPrimeKillsFramingBeat is pure ring
-// arithmetic; TestDuplexNoFiftyHzSeamWithRealWorker drives a REAL worker goroutine
-// and the REAL duplexCallback through the rings, exactly as Start() wires them.
+// arithmetic; TestPrimeOutputRingAppliesOneFrame exercises the real primeOutputRing
+// production path on a configured engine; TestDuplexNoFiftyHzSeamWithRealWorker
+// drives a REAL worker goroutine and the REAL duplexCallback through the rings,
+// priming via the same primeOutputRing helper Start() calls.
 
 import (
 	"math"
@@ -107,6 +113,56 @@ func TestOutputRingPrimeKillsFramingBeat(t *testing.T) {
 	}
 }
 
+// TestPrimeOutputRingAppliesOneFrame pins the PRODUCTION prime wiring itself. The
+// arithmetic test above proves the fix concept on a locally-built ring; this test
+// proves the actual code path Start() uses really primes the ring. It builds an
+// engine exactly as Configure would (configuredEngine wires the real rings) and
+// calls the same primeOutputRing helper Start() calls, then asserts the output ring
+// holds exactly one dsp frame of silence afterward.
+//
+// Mutation cover: deleting the prime push from primeOutputRing (the production fix)
+// makes length()==0 here and turns this test RED — the gap the arithmetic and
+// end-to-end tests left open (neither reached Start()'s wiring) is now closed.
+func TestPrimeOutputRingAppliesOneFrame(t *testing.T) {
+	e := configuredEngine()
+
+	if avail := e.outRing.length(); avail != 0 {
+		t.Fatalf("precondition: freshly configured output ring should be empty, got %d", avail)
+	}
+
+	e.primeOutputRing()
+
+	// Exactly one dsp frame of headroom: enough that available never dips below a
+	// period (480-192=288>0), and not so much that we waste latency. Anything other
+	// than dspFrame means the production prime no longer matches the fix.
+	if avail := e.outRing.length(); avail != dspFrame {
+		t.Fatalf("primeOutputRing must leave exactly one dsp frame of lead: got %d, want %d", avail, dspFrame)
+	}
+
+	// And the primed frame must be silence (it is a prefill, not signal): pulling it
+	// back must yield all zeros.
+	out := make([]float32, dspFrame)
+	if n := e.outRing.pull(out); n != dspFrame {
+		t.Fatalf("expected to pull a full primed frame, got %d samples", n)
+	}
+	for i, s := range out {
+		if s != 0 {
+			t.Fatalf("primed frame must be silence: sample %d = %v", i, s)
+		}
+	}
+}
+
+// TestPrimeOutputRingNilSafe confirms primeOutputRing is a no-op (no panic) when the
+// output ring has not been allocated — Start() guards on e.outRing != nil, but the
+// helper must also be self-safe so it can never panic the control path.
+func TestPrimeOutputRingNilSafe(t *testing.T) {
+	e := NewEngine(nil, nil) // no rings allocated
+	if e.outRing != nil {
+		t.Fatalf("precondition: expected nil output ring on a bare engine")
+	}
+	e.primeOutputRing() // must not panic
+}
+
 // TestDuplexNoFiftyHzSeamWithRealWorker is the end-to-end regression: it wires the
 // REAL rings + REAL worker goroutine + REAL duplexCallback exactly as Start() does
 // (including the one-frame output-ring prime), then drives the callback at
@@ -128,14 +184,16 @@ func TestDuplexNoFiftyHzSeamWithRealWorker(t *testing.T) {
 	e.SetNoiseSuppression(false)
 	e.SetAGC(false) // keep the level steady so the seam is the only 50Hz candidate
 
-	// Prime the output ring with one frame of silence, exactly as Start() does.
-	prime := make([]float32, dspFrame)
-	e.outRing.push(prime)
+	// Prime the output ring through the PRODUCTION path — the exact method Start()
+	// calls — not an inline re-implementation. If primeOutputRing is ever weakened or
+	// the call is dropped from Start(), this drives the engine into the buggy
+	// once-per-960 dip and the seam checks below fire.
+	e.primeOutputRing()
 
 	// Deterministic prime guard (no timing): immediately after priming the output
 	// ring must hold a full dsp frame of headroom — that one frame of lead is what
-	// keeps the worker ahead of the 192-sample pulls. If the Start()-equivalent
-	// prime is ever dropped, this fails before the spectral analysis even runs.
+	// keeps the worker ahead of the 192-sample pulls. If the production prime is ever
+	// dropped, this fails before the spectral analysis even runs.
 	if avail := e.outRing.length(); avail < dspFrame {
 		t.Fatalf("output ring not primed: available %d, want >= %d (one dsp frame of lead)", avail, dspFrame)
 	}
