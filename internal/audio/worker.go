@@ -73,9 +73,11 @@ type micWorker struct {
 	gate *noiseGate       // post-APM hard gate / VAD latch (APM has no hard mute)
 	den  denoise.Denoiser // RNNoise (Strong-tier denoiser + speech-probability VAD source)
 
-	// denVAD reports whether den actually provides a trained speech probability
-	// (true only when RNNoise built in this binary). When false the advanced VAD
-	// gate falls back to the energy latch, since Passthrough returns p==0.
+	// denVAD reports whether den actually provides a trained speech probability:
+	// true only when a real RNNoise denoiser was constructed (cgo build AND the
+	// native state allocated successfully), false when den fell back to Passthrough.
+	// When false the advanced VAD gate falls back to the energy latch, since
+	// Passthrough returns p==0 and would otherwise hold the gate permanently shut.
 	denVAD bool
 
 	// nsTierApplied / agcApplied / aecApplied track the APM submodule state currently
@@ -128,17 +130,29 @@ func (e *Engine) startWorker() {
 	// Build the RNNoise denoiser once, here, OFF the audio thread (like the APM). It
 	// serves two roles: the Strong-tier denoiser, and the speech-probability source
 	// for the advanced VAD gate in every tier. denoise.New(true) returns the real
-	// RNNoise when this binary built with cgo, else Passthrough (p==0); denVAD records
-	// which, so the VAD gate only trusts a real probability and otherwise falls back
-	// to energy. The denoiser runs only on THIS goroutine, never the malgo callback.
+	// RNNoise when this binary built with cgo, else Passthrough (p==0). The denoiser
+	// runs only on THIS goroutine, never the malgo callback.
 	den := denoise.New(true)
+
+	// denVAD MUST reflect the denoiser that was ACTUALLY constructed, not the
+	// build-time constant denoise.Available(): even in a cgo build, denoise.New(true)
+	// falls back to Passthrough when the native RNNoise state cannot be allocated at
+	// runtime (crnnoise.New/rnnoise_create failure). Passthrough.Process always
+	// returns p==0, so if denVAD were left true on that fallback the advanced VAD
+	// latch would see every frame below closeProb, never open, and silently mute the
+	// mic to Discord with no energy-gate safety net. Deriving it from the concrete
+	// type means a runtime allocation failure correctly drops the advanced VAD gate
+	// back to the energy latch (Passthrough is the only non-VAD Denoiser, so a type
+	// assertion is the exact, allocation-free test).
+	_, denIsPassthrough := den.(denoise.Passthrough)
+	denVAD := denoise.Available() && !denIsPassthrough
 
 	w := &micWorker{
 		e:             e,
 		apm:           proc,
 		gate:          newGate(),
 		den:           den,
-		denVAD:        denoise.Available(),
+		denVAD:        denVAD,
 		nsTierApplied: e.nsTier(),
 		agcApplied:    e.agc(),
 		aecApplied:    e.echoCancellation(),

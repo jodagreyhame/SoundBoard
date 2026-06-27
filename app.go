@@ -12,6 +12,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -248,6 +249,10 @@ type AudioState struct {
 	AttenuationAmount float64 `json:"attenuationAmount"`
 	// AudioSubsystem: "standard" | "legacy" | "experimental" (cosmetic).
 	AudioSubsystem string `json:"audioSubsystem"`
+	// PTTHotkey is the push-to-talk key combo bound in "ptt" mic mode (e.g.
+	// "ctrl+a"); empty means unbound. Surfaced so the UI can DISPLAY the live
+	// binding and re-bind it via SetPTTHotkey instead of misrepresenting a fixed key.
+	PTTHotkey string `json:"pttHotkey"`
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +338,7 @@ func (a *App) GetState() State {
 		AutoSensitivity:       s.Processing.AutoSens(),
 		AttenuationAmount:     float64(s.Processing.AttenuationAmount),
 		AudioSubsystem:        s.Processing.AudioSubsystem,
+		PTTHotkey:             s.Processing.PTTHotkey,
 	}
 	theme := s.Theme
 	if theme == "" {
@@ -715,6 +721,36 @@ func (a *App) SetAudioSubsystem(sub string) {
 	}
 	a.lcMu.Lock()
 	bk.settings.Processing.AudioSubsystem = sub
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// SetPTTHotkey re-binds the push-to-talk hotkey LIVE (Discord's PTT keybind) and
+// persists it, completing the "ptt" mic mode in the UI (previously PTT was only
+// configurable by hand-editing config.json). The combo (e.g. "ctrl+a") is bound
+// through the hotkey manager's unified PTT callback wired once at startup, so the
+// new key takes effect immediately — no restart. An empty combo clears the binding.
+//
+// A parse/registration error (an unsupported key, or a combo another app already
+// owns) leaves the PRIOR binding in place, is logged, and is NOT persisted, so the
+// config never stores a combo the backend rejected. The setting is only written on a
+// successful (re)bind, mirroring the other audio setters' push-then-persist order.
+func (a *App) SetPTTHotkey(combo string) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	combo = strings.TrimSpace(combo)
+	if bk.hotkeys != nil {
+		if err := bk.hotkeys.SetPTT(combo); err != nil {
+			if ctx := a.context(); ctx != nil {
+				runtime.LogErrorf(ctx, "set PTT hotkey %q: %v", combo, err)
+			}
+			return
+		}
+	}
+	a.lcMu.Lock()
+	bk.settings.Processing.PTTHotkey = combo
 	a.lcMu.Unlock()
 	a.persist()
 }

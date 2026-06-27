@@ -187,11 +187,13 @@ func newBackend() *Backend {
 			log.Printf("hotkey %q: %v", combo, err)
 		}
 	}
+	// Push-to-talk: wire the unified PTT callback to the engine ONCE, then bind the
+	// saved combo through it. Using OnPTT + SetPTT (rather than RegisterPTT with
+	// ad-hoc closures) means App.SetPTTHotkey can re-bind the key LIVE from the UI
+	// through this same engine wiring — no restart needed.
+	hk.OnPTT(func(down bool) { engine.SetPTTDown(down) })
 	if combo := settings.Processing.PTTHotkey; combo != "" {
-		if err := hk.RegisterPTT(combo,
-			func() { engine.SetPTTDown(true) },
-			func() { engine.SetPTTDown(false) },
-		); err != nil {
+		if err := hk.SetPTT(combo); err != nil {
 			log.Printf("PTT hotkey %q: %v", combo, err)
 		} else {
 			log.Printf("push-to-talk bound to %q (used in \"ptt\" mic mode)", combo)

@@ -83,7 +83,7 @@
       noiseSuppressionTier: "high", echoCancellation: false, agc: false,
       ducking: false, forceThrough: false, monitorSource: "clips",
       advancedVoiceActivity: true, autoSensitivity: true,
-      attenuationAmount: 0.5, audioSubsystem: "standard"
+      attenuationAmount: 0.5, audioSubsystem: "standard", pttHotkey: ""
     }
   };
 
@@ -100,6 +100,8 @@
     vol: { mic: 100, master: 100, monitor: 100 }, // percent (0..200 in the audio panel)
     clipGain: 100,
     micMode: "vad",
+    pttHotkey: "",            // bound push-to-talk combo (e.g. "ctrl+a"); "" = unbound
+    pttCapturing: false,      // true while the Record-combo capture is listening for keys
     gateSens: 15,             // percent 0..100 (Input Sensitivity manual threshold)
     gateLevel: 0,             // 0..1 from the gateLevel event
     monSrc: "clips",          // 'clips' | 'transmitted' — what the monitor plays
@@ -133,6 +135,7 @@
 
     var au = sn.audio || {};
     S.micMode = au.micMode || "vad";
+    S.pttHotkey = au.pttHotkey || "";
     S.gateSens = Math.round((au.gateSensitivity != null ? au.gateSensitivity : 0.15) * 100);
     S.monSrc = au.monitorSource === "transmitted" ? "transmitted" : "clips";
 
@@ -644,6 +647,90 @@
       host.appendChild(b);
     });
     show($("ptt-block"), S.micMode === "ptt");
+    renderPTT();
+  }
+
+  // PUSH-TO-TALK key binding. The label shows the live combo bound on the backend
+  // (App.SetPTTHotkey re-registers it instantly); the Record button captures the
+  // next modifier+key chord and binds it. Only keys the backend's parser accepts
+  // (letters, digits, F1–F12, plus Ctrl/Alt/Shift/Win modifiers) are captured.
+  var PTT_HINT = "Hold this combo to talk in push-to-talk mode. Applies instantly · saved automatically.";
+
+  // prettyCombo turns a stored combo ("ctrl+shift+a") into a display label
+  // ("Ctrl + Shift + A"); an empty combo shows a dash.
+  function prettyCombo(combo) {
+    if (!combo) return "—";
+    return combo.split("+").map(function (t) {
+      t = t.trim().toLowerCase();
+      if (t === "ctrl" || t === "control") return "Ctrl";
+      if (t === "alt") return "Alt";
+      if (t === "shift") return "Shift";
+      if (t === "win" || t === "super" || t === "meta" || t === "cmd") return "Win";
+      return t.toUpperCase();
+    }).join(" + ");
+  }
+
+  function renderPTT() {
+    if (S.pttCapturing) return; // leave the live "Press a combo…" prompt alone
+    var key = $("ptt-key");
+    if (key) key.textContent = prettyCombo(S.pttHotkey);
+  }
+
+  // pttKeyToken maps a KeyboardEvent to the non-modifier token the backend parser
+  // understands, using e.code so it is keyboard-layout robust. Returns null for
+  // modifier-only presses and for keys the parser does not accept (so capture keeps
+  // listening until a usable key arrives).
+  function pttKeyToken(e) {
+    var code = e.code || "";
+    var m;
+    if ((m = /^Key([A-Z])$/.exec(code))) return m[1].toLowerCase();
+    if ((m = /^Digit([0-9])$/.exec(code))) return m[1];
+    if (/^F([1-9]|1[0-2])$/.test(code)) return code.toLowerCase();
+    return null;
+  }
+
+  // startPTTCapture listens for the next chord and binds it via SetPTTHotkey. Esc
+  // cancels; Backspace/Delete clears the binding. Capture is a one-shot: the handler
+  // detaches as soon as a usable chord (or cancel/clear) arrives.
+  function startPTTCapture() {
+    if (S.pttCapturing) return;
+    S.pttCapturing = true;
+    var btn = $("ptt-rec"), key = $("ptt-key"), hint = $("ptt-hint");
+    if (btn) btn.textContent = "Press keys…";
+    if (key) key.textContent = "Press a combo…";
+    if (hint) hint.textContent = "Press a modifier + key. Esc cancels · Backspace clears.";
+
+    function finish() {
+      S.pttCapturing = false;
+      document.removeEventListener("keydown", onKey, true);
+      if (btn) btn.textContent = "Record combo…";
+      if (hint) hint.textContent = PTT_HINT;
+      renderPTT();
+    }
+
+    function onKey(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") { finish(); return; }
+      if (e.key === "Backspace" || e.key === "Delete") {
+        S.pttHotkey = "";
+        call("SetPTTHotkey", "");
+        finish();
+        return;
+      }
+      var tok = pttKeyToken(e);
+      if (!tok) return; // modifier-only or unsupported key — keep listening
+      var mods = [];
+      if (e.ctrlKey) mods.push("ctrl");
+      if (e.altKey) mods.push("alt");
+      if (e.shiftKey) mods.push("shift");
+      if (e.metaKey) mods.push("win");
+      S.pttHotkey = mods.concat(tok).join("+");
+      call("SetPTTHotkey", S.pttHotkey);
+      finish();
+    }
+
+    document.addEventListener("keydown", onKey, true);
   }
 
   // INPUT SENSITIVITY — Discord's "Input Sensitivity": an Automatic toggle plus a
@@ -950,6 +1037,7 @@
     renderMixer();
     renderMonSource();
     renderModes();
+    renderPTT();
     renderInputSensitivity();
     renderNSTier();
     renderToggles();
@@ -1041,6 +1129,15 @@
         S.autoSens = !S.autoSens;
         call("SetAutoSensitivity", S.autoSens);
         renderInputSensitivity();
+      });
+    }
+
+    // Push-to-talk "Record combo…" button — capture the next chord and bind it live.
+    var pttRec = $("ptt-rec");
+    if (pttRec) {
+      pttRec.addEventListener("click", function (e) {
+        e.stopPropagation();
+        startPTTCapture();
       });
     }
 
