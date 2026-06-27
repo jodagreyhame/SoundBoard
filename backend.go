@@ -1,5 +1,3 @@
-//go:build !fyne
-
 // backend.go owns the REAL backend the Wails App binds to: the malgo duplex
 // engine, the sound catalog, device enumeration, the VB-CABLE setup/routing
 // controller, global hotkeys, and the persisted settings. It is the Wails

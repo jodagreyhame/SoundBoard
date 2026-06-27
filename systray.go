@@ -1,5 +1,3 @@
-//go:build !fyne
-
 // systray.go runs the companion system-tray icon + menu on its own goroutine,
 // coexisting with the Wails main loop.
 //

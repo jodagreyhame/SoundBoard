@@ -1,5 +1,3 @@
-//go:build !fyne
-
 // app.go defines the Wails-bound Go App struct: the single object whose exported
 // methods the WebView2 frontend calls as window.go.main.App.<Method>, and the
 // source of the live events the frontend subscribes to via runtime.EventsOn.

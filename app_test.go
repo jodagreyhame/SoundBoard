@@ -1,5 +1,3 @@
-//go:build !fyne
-
 // app_test.go exercises the Wails-bound App's read path (GetState) against a
 // fake, hardware-free backend: an in-memory catalog built from an fstest.MapFS
 // and a hand-built config.Settings. No audio context, engine, or real devices

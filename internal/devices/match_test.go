@@ -6,10 +6,10 @@ func dev(name string, def bool) Device { return Device{Name: name, IsDefault: de
 
 func TestFindCableInput(t *testing.T) {
 	tests := []struct {
-		name    string
-		list    []Device
-		want    string
-		wantOK  bool
+		name   string
+		list   []Device
+		want   string
+		wantOK bool
 	}{
 		{
 			name:   "empty list",

@@ -1,589 +1,136 @@
-//go:build fyne
-
-// Command soundboard is a Windows 11 soundboard that mixes sound clips over
-// your live microphone via the VB-CABLE virtual audio cable, so anyone in
-// Discord (or any voice app) hears them as if you spoke.
+// Command soundboard (Wails v2 build — the DEFAULT/shipping entrypoint).
 //
-// LEGACY ENTRYPOINT: this is the original Fyne v2 UI. It is preserved on disk
-// behind the `fyne` build tag during the migration to Wails v2 (the default
-// build). Build it explicitly with `go build -tags fyne`. The shipping/default
-// build now uses the Wails entrypoint in main_wails.go.
+// This is the SoundBoard GUI rebuilt on Wails v2 (Go + WebView2) with the new
+// design. It is the sole entrypoint and default build; the legacy Fyne UI it
+// replaced has been removed.
 //
-// v2 architecture:
-//   - UI is a Fyne main window with a clip browser and volume sliders, plus a
-//     Fyne system-tray icon; closing the window hides it to the tray.
-//   - The malgo duplex engine captures the user's REAL mic and mixes the
-//     soundboard into CABLE Input. Software gains (mic, master, per-clip) are
-//     applied in the real-time callback.
-//   - Auto-route (internal/setup) detects VB-CABLE, offers a one-click install,
-//     and makes Discord need ZERO changes by setting the Windows default
-//     recording endpoint to "CABLE Output" while SoundBoard runs (restored on
-//     quit). The engine still captures the previous default mic, not the cable.
+// Architecture:
+//   - The frontend (frontend/dist) is a vanilla HTML/CSS/JS shell reproducing
+//     the design comp; it is embedded into the binary via go:embed and served by
+//     the Wails asset server. No JS framework, no npm build step.
+//   - The window is FRAMELESS (the design draws its own titlebar) and drags via
+//     the -webkit-app-region/--wails-draggable contract on the titlebar.
+//   - The bound Go App (app.go) exposes the method contract the frontend calls
+//     as window.go.main.App.<Method> and emits live events the frontend
+//     subscribes to (gateLevel / routingStatus / installProgress).
+//   - A companion system tray (getlantern/systray, systray.go) runs on its own
+//     goroutine alongside the Wails main loop: icon + Open/Quit menu. Closing the
+//     window hides to tray (OnBeforeClose); tray Open reshows it; tray Quit ends
+//     the process after the Wails shutdown cleanup.
 //
-// Sounds are NOT embedded: at launch the app reads the sounds/ folder next to
-// the executable, so dropping new clips into sounds/<category>/ and relaunching
-// needs no rebuild.
+// The bound App methods are wired to the real backend (internal/audio,
+// internal/setup, internal/config, internal/catalog, internal/hotkeys) via the
+// Backend constructed in main and injected with app.setBackend, without changing
+// any bound-method signature from the original binding contract.
 package main
 
 import (
-	"io"
-	"io/fs"
+	"context"
+	"embed"
 	"log"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
 
-	"github.com/gen2brain/malgo"
-
-	"soundboard/internal/apm"
-	"soundboard/internal/audio"
-	"soundboard/internal/catalog"
-	"soundboard/internal/config"
-	"soundboard/internal/devices"
-	"soundboard/internal/hotkeys"
-	"soundboard/internal/setup"
-	"soundboard/internal/ui"
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// assets embeds the built frontend. With a vanilla (no-build) frontend the
+// source files live directly under frontend/dist, so the embed is the shipped
+// asset tree as-is.
+//
+//go:embed all:frontend/dist
+var assets embed.FS
 
 func main() {
-	// Route diagnostics to a log file under the config dir. The shipping build
-	// uses -H=windowsgui, which detaches stderr, so plain log.* output would be
-	// invisible. Mirror to stderr too for console/dev builds.
-	if logPath, err := config.LogPath(); err == nil {
-		if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
-			defer f.Close()
-			log.SetOutput(io.MultiWriter(os.Stderr, f))
-		}
-	}
+	// Route diagnostics to the per-user config-dir log file (the shipping
+	// -H=windowsgui build detaches stderr) and mirror to stderr for dev runs.
+	closeLog := initLogging()
+	defer closeLog()
 
-	// Settings.
-	settings, err := config.Load()
-	if err != nil {
-		log.Fatalf("load settings: %v", err)
-	}
+	app := NewApp()
 
-	// Catalog: load clips from the sounds/ folder next to the executable at
-	// runtime (plug-and-play — nothing is embedded in the binary). Clips decode
-	// lazily on first play, so startup is instant.
-	root, base := soundsRoot()
-	soundsDir := filepath.Join(base, "sounds")
-	lib, err := catalog.New(root)
-	if err != nil {
-		log.Fatalf("build library from %s: %v", soundsDir, err)
-	}
-	var clipCount int
-	for _, c := range lib.Categories {
-		clipCount += len(c.Clips)
-	}
-	log.Printf("library: %d categories, %d clips indexed from %s (decoded on demand)", len(lib.Categories), clipCount, soundsDir)
+	// Bootstrap the REAL backend (engine, catalog, VB-CABLE routing, hotkeys,
+	// settings) synchronously BEFORE wails.Run — mirroring the Fyne main's
+	// startup ordering, where routing auto-engages and the mic is resolved before
+	// the UI loop runs. Injecting it now means GetState and the live-events loop
+	// see a fully wired backend from the first frame. setBackend also registers
+	// backend.close as the App's cleanup hook, so the OnShutdown choke point below
+	// performs the real engine.Stop / mic restore / config save.
+	backend := newBackend()
+	app.setBackend(backend)
 
-	// Audio context (WASAPI first, DirectSound fallback).
-	ctx, err := malgo.InitContext(
-		[]malgo.Backend{malgo.BackendWasapi, malgo.BackendDsound},
-		malgo.ContextConfig{},
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("init audio context: %v", err)
-	}
-	defer func() {
-		_ = ctx.Uninit()
-		ctx.Free()
-	}()
+	// Launch the companion system tray on its own goroutine BEFORE wails.Run so
+	// the tray is up alongside the Wails main loop. The tray's Open/Quit actions
+	// call back into the App (show window / quit) once the runtime context exists.
+	startTray(app)
 
-	// Enumerate devices and detect the VB-CABLE endpoints.
-	playback, capture, err := devices.Enumerate(ctx)
-	if err != nil {
-		log.Fatalf("enumerate devices: %v", err)
-	}
-	status := setup.Detect(playback, capture)
-	if !status.CableInputPresent {
-		log.Printf("VB-CABLE not detected. Install from %s", setup.DownloadURL())
-	}
+	err := wails.Run(&options.App{
+		Title:  "SoundBoard",
+		Width:  1160,
+		Height: 760,
 
-	// The setup controller owns the engage/restore state the UI banner reads and
-	// the action button drives. Build it up front so we can auto-engage routing
-	// before resolving the mic (engaging hijacks the default capture endpoint, so
-	// the engine must capture the PREVIOUS default, not the cable).
-	setupCtl := &setupController{status: status}
+		// The design comp targets a 1160x760 shell; keep a sensible floor so the
+		// sidebar + content never collapse. Resizable (DisableResize stays false).
+		MinWidth:  900,
+		MinHeight: 620,
 
-	// Auto-engage routing at startup when the cable is present, so Discord needs
-	// ZERO changes immediately rather than waiting for a manual button press.
-	// EngageRouting saves and later restores the user's real default mic; we defer
-	// that restore so the system-wide default capture endpoint is always put back
-	// on quit (even on the degraded/early-exit paths below).
-	defer setupCtl.Restore()
-	if status.CanEngage {
-		if err := setupCtl.Engage(); err != nil {
-			log.Printf("auto-engage routing: %v (you can retry from the window banner)", err)
-		} else {
-			log.Printf("routing engaged: Windows default mic now points at CABLE Output (restored on quit)")
-		}
-	}
+		// Frameless: the HTML titlebar IS the window chrome and drag region.
+		Frameless: true,
 
-	// Resolve the REAL mic to capture and the cable to play into. Once routing is
-	// engaged the Windows default capture endpoint IS the cable, so prefer the
-	// previous default mic that EngageRouting saved; never capture the cable.
-	mic, micOK := resolveMic(capture, settings.MicName)
-	cable, cableOK := resolveCable(playback, settings.CableName)
-	if !micOK {
-		log.Printf("no microphone resolved; using the system default capture device")
-	}
+		// Tray app lifecycle: closing the window hides it (handled in OnBeforeClose)
+		// rather than quitting, so the soundboard/hotkeys keep running. We manage
+		// the hide ourselves to also keep the tray in sync, so HideWindowOnClose is
+		// left false and OnBeforeClose returns prevent=true.
+		HideWindowOnClose: false,
 
-	engine := audio.NewEngine(ctx, lib)
+		AssetServer: &assetserver.Options{
+			Assets: assets,
+		},
 
-	// Seed the engine gains from saved volumes (default to unity).
-	applyVolumes(engine, settings)
+		// Bind the App so Wails injects its exported methods into the webview as
+		// window.go.main.App.<Method>. WITHOUT this the runtime never exposes the
+		// bound methods, every frontend call() resolves to null, and the UI silently
+		// falls back to its placeholder data — disconnected from the real backend.
+		// This is the line that connects the design frontend to the live engine/
+		// catalog/setup/config.
+		Bind: []interface{}{app},
 
-	// Seed the mic-processing suite from saved settings so the gate mode,
-	// sensitivity, and feature toggles are live from the first buffer. Log an
-	// honest line when noise suppression was requested but RNNoise is unavailable
-	// in this build (it degrades to passthrough rather than failing).
-	applyProcessing(engine, settings)
-	if settings.Processing.NoiseSuppression && !apm.Available() {
-		log.Printf("noise suppression enabled in settings but the WebRTC APM is unavailable (%v); it will be a no-op", apm.LoadError())
-	}
+		// Match the design's dark, near-black backdrop behind the rounded shell.
+		BackgroundColour: &options.RGBA{R: 13, G: 13, B: 15, A: 1},
 
-	// Without the VB-CABLE playback endpoint there is nowhere to route the mix.
-	// Run in degraded mode: keep the window alive so the user can install
-	// VB-CABLE and relaunch, but do not start the duplex engine.
-	if cableOK {
-		// Log the resolved endpoints right before Configure so a wrong mic (e.g.
-		// the cable accidentally picked as the capture device) is immediately
-		// visible in the diagnostics log instead of manifesting as a silent echo.
-		log.Printf("audio endpoints: capturing mic %q -> playing into cable %q", mic.Name, cable.Name)
-		if err := engine.Configure(mic, cable); err != nil {
-			log.Printf("configure engine: %v (running without audio routing)", err)
-		} else if err := engine.Start(); err != nil {
-			log.Printf("start engine: %v (running without audio routing)", err)
-		} else {
-			defer func() { _ = engine.Stop() }()
-			// Local monitor: also play triggered clips to the user's real
-			// speakers/headphones so they actually HEAR the soundboard. The duplex
-			// path only sends the mix to the cable (-> Discord); without a monitor
-			// the user hears nothing. Pick the default output device, never the
-			// virtual cable (monitoring into the cable would be silent + loop).
-			// applyVolumes above already seeded the monitor gain (default unity), so
-			// the moment the monitor device is enabled the user hears clips at the
-			// saved "what you hear" level — independent of the master "what others
-			// hear" level on the duplex path.
-			if spk, ok := resolveSpeakers(playback); ok {
-				if err := engine.SetMonitor(&spk); err != nil {
-					log.Printf("enable local monitor: %v", err)
-				} else {
-					log.Printf("monitor: clips also play on %q", spk.Name)
-				}
-			} else {
-				log.Printf("no local output device found; you will not hear your own clips")
-			}
-		}
-	} else {
-		log.Printf("VB-CABLE absent: starting in setup mode (no audio routing). Install VB-CABLE and relaunch.")
-	}
-
-	// Hotkeys fire clips at their saved per-clip volume.
-	hk := hotkeys.New()
-	hk.OnTrigger(func(clipID string) { engine.TriggerGain(clipID, clipGain(settings, clipID)) })
-	for combo, clipID := range settings.Hotkeys {
-		if lib.Get(clipID) == nil {
-			log.Printf("hotkey %q: clip %q not found in library", combo, clipID)
-		}
-		if err := hk.Register(combo, clipID); err != nil {
-			log.Printf("hotkey %q: %v", combo, err)
-		}
-	}
-	// Push-to-talk: when a PTT hotkey is configured, register it with real key
-	// down/up so holding it opens the mic gate (in "ptt" MicMode) and releasing it
-	// closes it. The engine ignores PTT state in the other gate modes, so a stray
-	// binding is harmless. A parse/registration error is logged, not fatal.
-	if combo := settings.Processing.PTTHotkey; combo != "" {
-		if err := hk.RegisterPTT(combo,
-			func() { engine.SetPTTDown(true) },
-			func() { engine.SetPTTDown(false) },
-		); err != nil {
-			log.Printf("PTT hotkey %q: %v", combo, err)
-		} else {
-			log.Printf("push-to-talk bound to %q (used in \"ptt\" mic mode)", combo)
-		}
-	}
-
-	hk.Run()
-	defer hk.Close()
-
-	// Save settings on exit.
-	defer func() {
-		if err := settings.Save(); err != nil {
-			log.Printf("save settings: %v", err)
-		}
-	}()
-
-	// Build the remaining controller the UI talks to, then run the Fyne main loop
-	// (blocks until Quit). setupCtl was built earlier so routing could auto-engage
-	// before mic resolution. The window store restores/persists the last window
-	// size via the deferred settings Save above.
-	vol := &volController{engine: engine, settings: settings}
-	app := ui.New(lib, engine, vol, setupCtl).
-		WithWindowStore(&winController{settings: settings}).
-		WithFavorites(&favController{settings: settings}).
-		WithAudio(&audioController{engine: engine, settings: settings})
-	app.Run()
-}
-
-// applyVolumes seeds the engine's mic/master/monitor gains from saved settings.
-// Volumes was normalized on load, so an UNSET channel is already unity while an
-// EXPLICIT level (including a deliberate 0 mute) is preserved — the gain accessors
-// honour both. The monitor seed matters most: at unity the user HEARS clips on
-// their local monitor by default, but a saved 0 mute is now respected too.
-func applyVolumes(engine *audio.Engine, s *config.Settings) {
-	engine.SetMicGain(s.Volumes.MicGain())
-	engine.SetMasterGain(s.Volumes.MasterGain())
-	engine.SetMonitorGain(s.Volumes.MonitorGain())
-}
-
-// applyProcessing seeds the engine's mic-processing suite from saved settings so
-// the gate mode, sensitivity, and feature toggles take effect from the first
-// buffer. settings.Processing was normalized on load, so MicMode and
-// GateSensitivity are already valid here.
-func applyProcessing(engine *audio.Engine, s *config.Settings) {
-	engine.SetMicMode(s.Processing.MicMode)
-	engine.SetGateSensitivity(s.Processing.GateSensitivity)
-	engine.SetNoiseSuppression(s.Processing.NoiseSuppression)
-	engine.SetAGC(s.Processing.AGC)
-	engine.SetDucking(s.Processing.Ducking)
-	engine.SetForceThrough(s.Processing.ForceThrough)
-}
-
-// clipGain returns the saved per-clip gain for id, defaulting to unity.
-func clipGain(s *config.Settings, id string) float32 {
-	if s.Volumes.PerClip != nil {
-		if g, ok := s.Volumes.PerClip[id]; ok {
-			return g
-		}
-	}
-	return 1
-}
-
-// Compile-time checks that the wiring types satisfy the UI's interfaces, so a
-// signature drift fails the build here rather than silently.
-var (
-	_ ui.Player              = (*audio.Engine)(nil)
-	_ ui.VolumeController    = (*volController)(nil)
-	_ ui.SetupController     = (*setupController)(nil)
-	_ ui.WindowStore         = (*winController)(nil)
-	_ ui.FavoritesController = (*favController)(nil)
-	_ ui.AudioController     = (*audioController)(nil)
-)
-
-// audioController adapts the engine + settings to ui.AudioController: each setter
-// pushes the new value into the engine immediately (atomic, RT-safe) AND records
-// it in settings.Processing so main's deferred settings.Save() persists it on
-// exit, matching how volumes/favourites/window size are saved. Getters seed the
-// Audio panel from the saved settings. It satisfies ui.AudioController.
-//
-// SetPTTHotkey persists the combo but does NOT live-rebind the global hotkey
-// here; PTT registration happens at startup from the saved setting. A changed PTT
-// combo takes effect on the next launch, which is documented to the user. (Live
-// re-registration would require threading the hotkey Manager through here; it is
-// deferred to keep this foundation adapter thin.)
-type audioController struct {
-	engine   *audio.Engine
-	settings *config.Settings
-}
-
-func (a *audioController) NoiseSuppression() bool { return a.settings.Processing.NoiseSuppression }
-func (a *audioController) SetNoiseSuppression(on bool) {
-	a.engine.SetNoiseSuppression(on)
-	a.settings.Processing.NoiseSuppression = on
-}
-
-func (a *audioController) AGC() bool { return a.settings.Processing.AGC }
-func (a *audioController) SetAGC(on bool) {
-	a.engine.SetAGC(on)
-	a.settings.Processing.AGC = on
-}
-
-func (a *audioController) Ducking() bool { return a.settings.Processing.Ducking }
-func (a *audioController) SetDucking(on bool) {
-	a.engine.SetDucking(on)
-	a.settings.Processing.Ducking = on
-}
-
-func (a *audioController) MicMode() string { return a.settings.Processing.MicMode }
-func (a *audioController) SetMicMode(mode string) {
-	a.engine.SetMicMode(mode)
-	a.settings.Processing.MicMode = mode
-}
-
-func (a *audioController) GateSensitivity() float32 { return a.settings.Processing.GateSensitivity }
-func (a *audioController) SetGateSensitivity(t float32) {
-	a.engine.SetGateSensitivity(t)
-	a.settings.Processing.GateSensitivity = t
-}
-
-func (a *audioController) ForceThrough() bool { return a.settings.Processing.ForceThrough }
-func (a *audioController) SetForceThrough(on bool) {
-	a.engine.SetForceThrough(on)
-	a.settings.Processing.ForceThrough = on
-}
-
-func (a *audioController) PTTHotkey() string { return a.settings.Processing.PTTHotkey }
-func (a *audioController) SetPTTHotkey(combo string) {
-	// Persist only; the global PTT binding is registered at startup. A changed
-	// combo takes effect on the next launch.
-	a.settings.Processing.PTTHotkey = combo
-}
-
-func (a *audioController) GateLevel() float32 { return a.engine.GateLevel() }
-
-// favController adapts config.Settings.Favorites to ui.FavoritesController. A
-// toggle mutates the in-memory Favorites slice (added at the end when newly
-// favourited, removed otherwise); main's deferred settings.Save() persists it on
-// exit, matching how volumes/window size are saved. It satisfies
-// ui.FavoritesController.
-type favController struct {
-	settings *config.Settings
-}
-
-func (f *favController) IsFavorite(id string) bool {
-	for _, fid := range f.settings.Favorites {
-		if fid == id {
+		OnStartup: func(ctx context.Context) {
+			app.startup(ctx)
+		},
+		// Close-to-tray: prevent the real close, hide the window instead. The tray
+		// (or the in-window Quit) is the only path that truly exits.
+		OnBeforeClose: func(ctx context.Context) (prevent bool) {
+			wailsruntime.WindowHide(ctx)
 			return true
-		}
-	}
-	return false
-}
+		},
+		OnShutdown: func(ctx context.Context) {
+			// Single shutdown choke point. Every exit path (tray Quit, in-window
+			// Quit, OS-level close that escaped OnBeforeClose) unwinds through here.
+			// Run the backend teardown FIRST — engine.Stop, restore the default mic,
+			// save config — via the cleanup hook the backend registered with
+			// app.OnCleanup (Backend.close, guarded to run exactly once), THEN stop
+			// the tray goroutine so its message loop returns and the process can exit
+			// cleanly.
+			app.runCleanup()
+			stopTray()
+		},
 
-func (f *favController) ToggleFavorite(id string) {
-	for i, fid := range f.settings.Favorites {
-		if fid == id {
-			// Remove: splice it out, preserving the order of the rest.
-			f.settings.Favorites = append(f.settings.Favorites[:i], f.settings.Favorites[i+1:]...)
-			return
-		}
-	}
-	f.settings.Favorites = append(f.settings.Favorites, id)
-}
-
-// Favorites returns the favourited clip IDs in their pinned display order. It
-// returns the live slice; the UI only reads it.
-func (f *favController) Favorites() []string { return f.settings.Favorites }
-
-// winController adapts config.WindowPrefs to ui.WindowStore: the UI reads the
-// saved size on build and writes the latest size back here, which is persisted
-// by main's deferred settings.Save(). It satisfies ui.WindowStore.
-type winController struct {
-	settings *config.Settings
-}
-
-func (w *winController) WindowSize() (float32, float32, bool) {
-	p := w.settings.Window
-	return p.Width, p.Height, p.Width > 0 && p.Height > 0
-}
-
-func (w *winController) SetWindowSize(width, height float32) {
-	w.settings.Window.Width = width
-	w.settings.Window.Height = height
-}
-
-// volController adapts the engine + settings to ui.VolumeController. Setters
-// push the new level to the engine and persist it in settings; getters seed the
-// sliders. It satisfies ui.VolumeController.
-type volController struct {
-	engine   *audio.Engine
-	settings *config.Settings
-}
-
-func (v *volController) SetMic(g float32) {
-	v.engine.SetMicGain(g)
-	v.settings.Volumes.Mic = config.FloatPtr(g)
-}
-
-func (v *volController) SetMaster(g float32) {
-	v.engine.SetMasterGain(g)
-	// Store an EXPLICIT pointer (not a bare 0 that omitempty would drop and normalize
-	// would un-mute): a deliberate 0 here mutes what Discord hears and must persist.
-	v.settings.Volumes.Master = config.FloatPtr(g)
-}
-
-// SetMonitor sets the local monitor level — the soundboard volume the USER hears
-// in their own headset — independent of SetMaster (what Discord hears). It pushes
-// the new level to the engine's monitor path and persists it.
-func (v *volController) SetMonitor(g float32) {
-	v.engine.SetMonitorGain(g)
-	v.settings.Volumes.Monitor = config.FloatPtr(g)
-}
-
-func (v *volController) SetClip(id string, g float32) {
-	if v.settings.Volumes.PerClip == nil {
-		v.settings.Volumes.PerClip = map[string]float32{}
-	}
-	v.settings.Volumes.PerClip[id] = g
-}
-
-func (v *volController) Mic() float32           { return v.settings.Volumes.MicGain() }
-func (v *volController) Master() float32        { return v.settings.Volumes.MasterGain() }
-func (v *volController) Monitor() float32       { return v.settings.Volumes.MonitorGain() }
-func (v *volController) Clip(id string) float32 { return clipGain(v.settings, id) }
-
-// setupController adapts internal/setup to ui.SetupController. It tracks not just
-// whether the cable is PRESENT (status.CanEngage) but whether routing has been
-// ENGAGED, and captures the restore closure returned by EngageRouting so the
-// user's default mic can be put back on quit. It satisfies ui.SetupController.
-type setupController struct {
-	mu      sync.Mutex
-	status  setup.Status
-	engaged bool
-	restore func() // reverts the default mic; nil until Engage succeeds
-}
-
-// Status reports ready only when routing is actually ENGAGED (the Windows
-// default mic is pointed at CABLE Output), not merely when the cable exists.
-// Reporting ready on cable-present alone would make the banner claim "routing
-// active" while Discord still hears the real mic.
-func (s *setupController) Status() (bool, string) {
-	s.mu.Lock()
-	engaged := s.engaged
-	s.mu.Unlock()
-
-	if engaged {
-		return true, "Discord hears the soundboard — no Discord changes needed"
-	}
-	if s.status.CanEngage {
-		return false, "VB-CABLE detected — click Engage routing"
-	}
-	if s.status.CableInputPresent {
-		return false, "VB-CABLE Input found, but CABLE Output is missing"
-	}
-	return false, "VB-CABLE NOT detected — click Install / Fix routing"
-}
-
-// CanEngage reports whether both cable endpoints are present so routing can be
-// engaged without installing.
-func (s *setupController) CanEngage() bool { return s.status.CanEngage }
-
-func (s *setupController) Install() error { return setup.InstallCable(nil) }
-
-// Engage points the Windows default mic at CABLE Output and STORES the restore
-// closure so main can revert it on quit. Without capturing restore, the user's
-// system-wide default microphone would stay on CABLE Output forever after the
-// app exits.
-func (s *setupController) Engage() error {
-	restore, err := setup.EngageRouting()
+		Windows: &windows.Options{
+			// Dark titlebar/controls for the frameless edges; the page paints the rest.
+			Theme: windows.Dark,
+			// Keep the webview opaque (the page draws its own background); enabling
+			// transparency/translucency (Mica/Acrylic) is a phase-2 polish option.
+			WebviewIsTransparent: false,
+			WindowIsTranslucent:  false,
+		},
+	})
 	if err != nil {
-		return err
+		log.Fatalf("wails run: %v", err)
 	}
-	s.mu.Lock()
-	s.restore = restore
-	s.engaged = true
-	s.mu.Unlock()
-	return nil
-}
-
-// Restore reverts the default-mic hijack if routing was engaged. Safe to call
-// when not engaged (no-op). main defers this so the real mic is always put back.
-func (s *setupController) Restore() {
-	s.mu.Lock()
-	restore := s.restore
-	s.restore = nil
-	s.engaged = false
-	s.mu.Unlock()
-	if restore != nil {
-		restore()
-	}
-}
-
-// soundsRoot locates the directory that contains the sounds/ folder and returns
-// an fs.FS rooted there plus the chosen base path. It prefers the directory of
-// the running executable, then the current working directory. If no sounds/
-// exists yet, it creates an empty one next to the exe so first run is clean.
-func soundsRoot() (fs.FS, string) {
-	var bases []string
-	if exe, err := os.Executable(); err == nil {
-		bases = append(bases, filepath.Dir(exe))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		bases = append(bases, wd)
-	}
-	for _, b := range bases {
-		if st, err := os.Stat(filepath.Join(b, "sounds")); err == nil && st.IsDir() {
-			return os.DirFS(b), b
-		}
-	}
-	base := "."
-	if len(bases) > 0 {
-		base = bases[0]
-	}
-	_ = os.MkdirAll(filepath.Join(base, "sounds"), 0o755)
-	return os.DirFS(base), base
-}
-
-// isCableName reports whether a device name belongs to the VB-CABLE virtual
-// audio device (CABLE Input / CABLE Output). Shared by resolveMic and
-// resolveSpeakers so neither ever picks the cable as a real endpoint.
-func isCableName(name string) bool {
-	return strings.Contains(strings.ToUpper(name), "CABLE")
-}
-
-func resolveMic(capture []devices.Device, name string) (devices.Device, bool) {
-	// An explicit saved mic name always wins — but NEVER resolve to the cable: once
-	// routing is engaged the default/ saved capture endpoint may be CABLE Output,
-	// and capturing it would feed the cable back into itself (an echo/loop with no
-	// real voice). A cable name here is treated as "unset" and we fall through.
-	if name != "" && !isCableName(name) {
-		if d, ok := devices.FindByName(capture, name); ok {
-			return d, true
-		}
-	}
-	// If routing was engaged, the live Windows default capture endpoint is now
-	// the cable — capturing it would feed the cable back into itself. Prefer the
-	// real mic that EngageRouting saved BEFORE the hijack.
-	if d, ok := setup.PreviousDefaultMic(); ok && !isCableName(d.Name) {
-		return d, true
-	}
-	// Fall back to the system default mic, but skip it if it is the cable (after
-	// routing engages the default capture IS the cable). In that case pick the
-	// first non-cable capture device so we never hand the engine the cable as its
-	// microphone. Mirrors resolveSpeakers' non-cable fallback.
-	if d, ok := devices.DefaultMic(capture); ok && !isCableName(d.Name) {
-		return d, true
-	}
-	for _, d := range capture {
-		if !isCableName(d.Name) {
-			return d, true
-		}
-	}
-	return devices.Device{}, false
-}
-
-func resolveCable(playback []devices.Device, name string) (devices.Device, bool) {
-	if name != "" {
-		if d, ok := devices.FindByName(playback, name); ok {
-			return d, true
-		}
-	}
-	return devices.FindCableInput(playback)
-}
-
-// resolveSpeakers picks the real output device to monitor clips on — the user's
-// actual speakers/headphones — explicitly EXCLUDING the virtual cable (playing
-// the monitor into the cable would be silent to the user and just loop back to
-// Discord). It prefers the default playback device; if that is the cable (the
-// VB-CABLE installer sometimes makes CABLE Input the default output), it falls
-// back to the first non-cable playback device.
-func resolveSpeakers(playback []devices.Device) (devices.Device, bool) {
-	var fallback devices.Device
-	var haveFallback bool
-	for _, d := range playback {
-		if isCableName(d.Name) {
-			continue // never monitor into the virtual cable
-		}
-		if !haveFallback {
-			fallback, haveFallback = d, true
-		}
-		if d.IsDefault {
-			return d, true
-		}
-	}
-	return fallback, haveFallback
 }
