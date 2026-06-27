@@ -68,6 +68,59 @@ const (
 	gateHysteresis = 0.6
 )
 
+// --- Advanced (RNNoise) VAD latch ----------------------------------------------
+//
+// When Advanced Voice Activity is on, the gate is driven by RNNoise's per-frame
+// SPEECH PROBABILITY instead of raw energy. RNNoise is a trained speech/noise
+// discriminator, so breathing (which HAS energy but is NOT speech) keeps the
+// probability low and the gate closed — this is the breathing fix. The latch
+// machinery mirrors the energy latch (hysteresis + a hold window) but operates on
+// the probability p in [0,1] rather than RMS.
+const (
+	// vadHoldFrames keeps the gate open for ~250ms after the speech probability
+	// drops below the close threshold. It is far longer than the energy gate's 30ms
+	// hold ON PURPOSE: breath lives in the gaps BETWEEN words and we want those gated,
+	// but real word-to-word gaps are much shorter than 250ms, so a long hold bridges
+	// syllables/consonant tails without re-opening for the breath that follows a
+	// sentence. The gate is evaluated once per 10ms frame, so 25 frames == 250ms.
+	vadHoldFrames = 25
+
+	// vadOpenBias is the VAD open probability at sensitivity 0. The effective open
+	// threshold is vadOpenBias + sensitivity, clamped to [vadOpenProbMin,
+	// vadOpenProbMax]. With the default sensitivity 0.15 this yields an open
+	// probability of 0.6 — the design's recommended "speech, not breath" point.
+	vadOpenBias = 0.45
+
+	// vadOpenProbMin / vadOpenProbMax bound the open threshold so an extreme
+	// sensitivity never makes the gate impossible (too high) or always-open (too low).
+	vadOpenProbMin = 0.2
+	vadOpenProbMax = 0.95
+
+	// vadCloseRatio sets the close threshold as a fraction of the open threshold
+	// (hysteresis): closeProb = openProb * vadCloseRatio. At the default open 0.6 this
+	// gives a close threshold of ~0.35, matching the design.
+	vadCloseRatio = 0.5833
+)
+
+// vadOpenProbFor maps the [0,1] input sensitivity to the VAD OPEN probability
+// threshold. Higher sensitivity demands a higher speech probability to open (more
+// aggressive gating that rejects more marginal/breathy frames). The result is
+// clamped to [vadOpenProbMin, vadOpenProbMax].
+func vadOpenProbFor(sensitivity float32) float32 {
+	if sensitivity < 0 {
+		sensitivity = 0
+	} else if sensitivity > 1 {
+		sensitivity = 1
+	}
+	open := vadOpenBias + sensitivity
+	if open < vadOpenProbMin {
+		open = vadOpenProbMin
+	} else if open > vadOpenProbMax {
+		open = vadOpenProbMax
+	}
+	return open
+}
+
 // noiseGate ramps a 0..1 gain toward fully-open (1) when the frame RMS exceeds the
 // open threshold and toward closed (0) after it falls below the close threshold
 // and the hold time elapses. The gain is slewed per sample with attack/release
@@ -127,6 +180,32 @@ func (g *noiseGate) updateLatch(frameRMS, openThresh float32) {
 	}
 	// In the band [closeThresh, openThresh) the latch holds its current state
 	// (hysteresis), so nothing changes here.
+}
+
+// updateLatchVAD advances the SAME hysteresis open/close latch for one frame, but
+// keyed on the RNNoise speech probability p rather than energy. openProb is the
+// open threshold (from vadOpenProbFor); the close threshold is derived by the
+// vadCloseRatio so a probability hovering near the open point does not chatter the
+// gate. The hold window is vadHoldFrames (~250ms) so within-sentence gaps and
+// consonant tails do not chop, while the breath that fills the gap after a sentence
+// is gated once the hold elapses. Like updateLatch it only moves the latch target;
+// the per-sample gain ramp still happens in apply, so onsets stay click-free.
+func (g *noiseGate) updateLatchVAD(p, openProb float32) {
+	closeProb := openProb * vadCloseRatio
+	if p >= openProb {
+		g.open = true
+		g.holdLeft = vadHoldFrames
+	} else if p < closeProb {
+		// Below the close threshold: count the hold window down one frame at a time
+		// and only drop the latch once it has fully elapsed.
+		if g.holdLeft > 0 {
+			g.holdLeft--
+		}
+		if g.holdLeft == 0 {
+			g.open = false
+		}
+	}
+	// In the band [closeProb, openProb) the latch holds its current state.
 }
 
 // apply ramps the gate gain toward the latched target (1 if open, 0 if closed)

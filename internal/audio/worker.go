@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"soundboard/internal/apm"
+	"soundboard/internal/denoise"
 )
 
 const (
@@ -68,14 +69,34 @@ const (
 type micWorker struct {
 	e *Engine
 
-	apm  apm.Processor // real WebRTC APM (HPF+NS+AGC), or no-op when unavailable
-	gate *noiseGate    // post-APM hard gate / VAD latch (APM has no hard mute)
+	apm  apm.Processor    // real WebRTC APM (HPF+NS+AGC), or no-op when unavailable
+	gate *noiseGate       // post-APM hard gate / VAD latch (APM has no hard mute)
+	den  denoise.Denoiser // RNNoise (Strong-tier denoiser + speech-probability VAD source)
 
-	// nsApplied / agcApplied track the NS/AGC submodule state currently applied to
-	// the APM so process() re-applies config ONLY when the user toggles change,
-	// never per frame. They mirror the engine's noiseSuppression()/agc() atomics.
-	nsApplied  bool
-	agcApplied bool
+	// denVAD reports whether den actually provides a trained speech probability
+	// (true only when RNNoise built in this binary). When false the advanced VAD
+	// gate falls back to the energy latch, since Passthrough returns p==0.
+	denVAD bool
+
+	// nsTierApplied / agcApplied / aecApplied track the APM submodule state currently
+	// applied so process() re-applies config ONLY when a user toggle changes, never
+	// per frame. They mirror the engine's nsTier()/agc()/echoCancellation() atomics.
+	nsTierApplied int32
+	agcApplied    bool
+	aecApplied    bool
+
+	// vadScratch is a preallocated copy buffer: in the None/Standard/High tiers the
+	// worker copies the post-APM frame here and runs RNNoise on the COPY purely to
+	// read its speech probability, leaving the APM output as the transmitted signal.
+	// In the Strong tier RNNoise runs on the real frame instead and this is unused.
+	vadScratch [dspFrame]float32
+
+	// noiseFloor / floorSeeded back the automatic-input-sensitivity follower (Discord
+	// "Automatically determine input sensitivity"): when auto-sensitivity is on the
+	// energy gate's open threshold tracks this slow noise-floor estimate instead of
+	// the manual slider. Worker-owned; updated once per frame on the energy path.
+	noiseFloor  float32
+	floorSeeded bool
 
 	frame [dspFrame]float32 // reused mono scratch, never reallocated
 
@@ -91,13 +112,10 @@ type micWorker struct {
 // a no-op Processor, so the chain degrades to a clean passthrough + the hard gate,
 // never a broken pipeline.
 func (e *Engine) startWorker() {
-	// Build the Discord-exact config, then fold in the user's live NS/AGC toggles
-	// (the UI "Noise suppression" -> APM NS at Moderate, "AGC" -> APM gain control).
-	cfg := apm.DiscordConfig()
-	ns := e.noiseSuppression()
-	ag := e.agc()
-	cfg.NoiseSuppressionEnabled = ns
-	cfg.GainControlEnabled = ag
+	// Build the APM config from the live noise-suppression tier plus the AGC/echo
+	// toggles. The tier maps to the APM noise-suppression submodule (none->off,
+	// standard->Moderate, high->High, strong->off because RNNoise denoises instead).
+	cfg := e.buildAPMConfig()
 
 	proc, err := apm.New(cfg)
 	if err != nil {
@@ -107,13 +125,24 @@ func (e *Engine) startWorker() {
 		_ = err
 	}
 
+	// Build the RNNoise denoiser once, here, OFF the audio thread (like the APM). It
+	// serves two roles: the Strong-tier denoiser, and the speech-probability source
+	// for the advanced VAD gate in every tier. denoise.New(true) returns the real
+	// RNNoise when this binary built with cgo, else Passthrough (p==0); denVAD records
+	// which, so the VAD gate only trusts a real probability and otherwise falls back
+	// to energy. The denoiser runs only on THIS goroutine, never the malgo callback.
+	den := denoise.New(true)
+
 	w := &micWorker{
-		e:          e,
-		apm:        proc,
-		gate:       newGate(),
-		nsApplied:  ns,
-		agcApplied: ag,
-		stop:       make(chan struct{}),
+		e:             e,
+		apm:           proc,
+		gate:          newGate(),
+		den:           den,
+		denVAD:        denoise.Available(),
+		nsTierApplied: e.nsTier(),
+		agcApplied:    e.agc(),
+		aecApplied:    e.echoCancellation(),
+		stop:          make(chan struct{}),
 	}
 	e.worker = w
 	w.wg.Add(1)
@@ -132,6 +161,9 @@ func (e *Engine) stopWorker() {
 	w.wg.Wait()
 	if w.apm != nil {
 		w.apm.Close()
+	}
+	if w.den != nil {
+		w.den.Close()
 	}
 	e.worker = nil
 }
@@ -199,55 +231,156 @@ func (w *micWorker) run() {
 	}
 }
 
+// buildAPMConfig assembles the APM Config from the engine's live noise-suppression
+// tier and AGC/echo toggles. It is the single place the tier -> APM noise-suppression
+// mapping lives, shared by startWorker (first apply) and process (runtime re-apply).
+func (e *Engine) buildAPMConfig() apm.Config {
+	cfg := apm.DiscordConfig()
+	cfg.GainControlEnabled = e.agc()
+	cfg.EchoCancellationEnabled = e.echoCancellation()
+	enabled, level := nsConfigForTier(e.nsTier())
+	cfg.NoiseSuppressionEnabled = enabled
+	cfg.NoiseSuppressionLevel = level
+	return cfg
+}
+
+// nsConfigForTier maps a noise-suppression tier to the APM noise-suppression
+// submodule state. The Strong tier disables APM NS because RNNoise denoises the
+// signal instead — the two are NEVER stacked. None also disables it. Standard and
+// High map to the WebRTC Moderate/High aggressiveness levels.
+func nsConfigForTier(tier int32) (enabled bool, level apm.NSLevel) {
+	switch tier {
+	case nsTierStandard:
+		return true, apm.NSLevelModerate
+	case nsTierHigh:
+		return true, apm.NSLevelHigh
+	default: // nsTierNone, nsTierStrong -> APM NS off
+		return false, apm.NSLevelModerate
+	}
+}
+
 // process runs the mic chain on one 480-sample MONO frame in place, reading every
 // control via a single atomic load so a setting change takes effect on the next
 // frame. The chain is now:
 //
-//  1. WebRTC APM ProcessCapture: HPF + noise suppression + automatic gain control
-//     in one call, at Discord's exact config. The UI's "Noise suppression" and
-//     "AGC" toggles map to the APM's NS and gain-control submodules; a toggle change
-//     is re-applied here (off the audio thread) before processing the frame.
-//  2. Hard gate: the APM has NO hard mute, so the engine's PTT/Mute/MicMode gating
-//     and VAD latch run on the POST-APM signal and ramp the frame to silence when
-//     the mic must be closed. The VAD energy is the post-APM RMS (after NS/AGC), so
-//     the UI GateLevel reflects the signal Discord actually receives.
+//  1. WebRTC APM ProcessCapture: HPF + noise suppression (at the tier's level, OFF
+//     in the Strong tier) + automatic gain control + (parity) echo cancellation. A
+//     tier/AGC/echo change is re-applied here (off the audio thread) before the call.
+//  2. RNNoise: in the Strong tier it denoises the transmitted signal IN PLACE (our
+//     Krisp analog, never stacked with APM NS); in every tier it also yields a trained
+//     SPEECH PROBABILITY used by the advanced VAD gate. Outside Strong it runs on a
+//     COPY so the APM output stays the transmitted signal.
+//  3. Hard gate / VAD: the APM has NO hard mute, so the engine's PTT/Mute/MicMode
+//     gating and the gate latch run on the POST-APM signal and ramp the frame to
+//     silence when the mic must be closed. In VAD mode the latch is driven by the
+//     RNNoise speech probability when Advanced Voice Activity is on (breathing, which
+//     has energy but is not speech, keeps the probability low so the gate stays shut),
+//     and by the energy/RMS latch otherwise.
+//
+// Everything here runs on the worker goroutine (never the malgo callback) and uses
+// only preallocated scratch — no alloc, lock, or IO in the hot loop.
 func (w *micWorker) process(frame []float32) {
-	// 1) Re-apply the APM config only when the NS/AGC toggles changed since the last
-	//    frame — never per frame. This runs on THIS goroutine (the same one that calls
-	//    ProcessCapture), satisfying WebRTC's "no config setter concurrent with
-	//    ProcessStream" rule. UI "Noise suppression" -> APM NS (Moderate); UI "AGC" ->
-	//    APM gain control.
-	ns := w.e.noiseSuppression()
+	// 1) Re-apply the APM config only when the tier/AGC/echo toggles changed since the
+	//    last frame — never per frame. This runs on THIS goroutine (the same one that
+	//    calls ProcessCapture), satisfying WebRTC's "no config setter concurrent with
+	//    ProcessStream" rule.
+	tier := w.e.nsTier()
 	ag := w.e.agc()
-	if ns != w.nsApplied || ag != w.agcApplied {
-		cfg := apm.DiscordConfig()
-		cfg.NoiseSuppressionEnabled = ns
-		cfg.GainControlEnabled = ag
-		w.apm.Reconfigure(cfg)
-		w.nsApplied = ns
+	aec := w.e.echoCancellation()
+	if tier != w.nsTierApplied || ag != w.agcApplied || aec != w.aecApplied {
+		w.apm.Reconfigure(w.e.buildAPMConfig())
+		w.nsTierApplied = tier
 		w.agcApplied = ag
+		w.aecApplied = aec
 	}
 
-	// 2) Run the real WebRTC capture chain (HPF + NS + AGC) in place. On a no-op
-	//    Processor (APM unavailable) this leaves the frame untouched — clean
-	//    passthrough — and the hard gate below still applies.
+	// 2) Run the real WebRTC capture chain (HPF + NS(tier) + AGC) in place. On a no-op
+	//    Processor (APM unavailable) this leaves the frame untouched — clean passthrough.
 	w.apm.ProcessCapture(frame)
 
-	// 3) Measure the POST-APM energy for the gate's VAD latch and the UI meter. The
-	//    APM has already done HPF/NS/AGC, so this RMS is the level Discord receives.
-	energy := rms(frame)
-
-	// 4) Hard gate / VAD: behavior depends on MicMode. The energy/hysteresis latch is
-	//    only consulted in VAD mode; the other modes force the gate open or closed.
-	//    This is the PTT/Mute/MicMode hard gating the APM cannot do.
+	// 3) RNNoise. In the Strong tier it denoises the TRANSMITTED frame in place and
+	//    returns the speech probability; otherwise it runs on a preallocated COPY purely
+	//    to read the probability, leaving the APM output as the transmitted signal. It
+	//    is only run when its result is actually needed (Strong always; the VAD gate
+	//    when it is the active decision), so quiet/forced modes stay cheap.
 	forceOpen, forceClosed := w.gateOverride()
-	if !forceOpen && !forceClosed {
-		w.gate.updateLatch(energy, thresholdFor(w.e.gateSensitivity()))
+	strong := tier == nsTierStrong
+	useVAD := !forceOpen && !forceClosed && w.e.advancedVAD() && w.denVAD
+	var p float32
+	if w.den != nil {
+		if strong {
+			p = w.den.Process(frame) // denoise applied to the transmitted signal + p
+		} else if useVAD {
+			copy(w.vadScratch[:], frame)
+			p = w.den.Process(w.vadScratch[:]) // probability only; output discarded
+		}
 	}
-	level := w.gate.apply(frame, forceOpen, forceClosed)
 
-	// Publish the gate-open level (derived from the post-APM RMS) for the UI meter.
+	// 4) Gate latch (skipped when the mode forces the gate open/closed). VAD mode with
+	//    Advanced Voice Activity uses the speech-probability latch; everything else uses
+	//    the energy latch, whose open threshold is either the manual sensitivity slider
+	//    or the automatic noise-floor follower.
+	if !forceOpen && !forceClosed {
+		if useVAD {
+			w.gate.updateLatchVAD(p, vadOpenProbFor(w.e.gateSensitivity()))
+		} else {
+			energy := rms(frame)
+			w.gate.updateLatch(energy, w.energyThreshold(energy))
+		}
+	}
+
+	// 5) Apply the gate (per-sample ramp, click-free) and publish the open level for
+	//    the UI mic-open meter — derived from the signal Discord actually receives.
+	level := w.gate.apply(frame, forceOpen, forceClosed)
 	w.e.setGateLevel(level)
+}
+
+// energyThreshold returns the energy-gate OPEN threshold for this frame. With
+// automatic input sensitivity off it is the manual sensitivity slider mapped through
+// thresholdFor. With it on, the threshold tracks a slow noise-floor follower (Discord
+// "Automatically determine input sensitivity"): open at autoSensMargin times the
+// estimated floor, clamped to a sane band so a dead-silent or very loud room still
+// gates sensibly. Called only on the energy path; updates the floor as a side effect.
+func (w *micWorker) energyThreshold(energy float32) float32 {
+	if !w.e.autoSensitivity() {
+		return thresholdFor(w.e.gateSensitivity())
+	}
+	w.updateNoiseFloor(energy)
+	auto := w.noiseFloor * autoSensMargin
+	if auto < autoSensMinThresh {
+		auto = autoSensMinThresh
+	}
+	if auto > gateMaxThreshold {
+		auto = gateMaxThreshold
+	}
+	return auto
+}
+
+// noise-floor follower tuning. The floor adopts a LOWER energy quickly (so it finds
+// the true room noise) and creeps UPWARD slowly (so speech does not drag it up and
+// jam the gate). The open threshold is autoSensMargin times the floor, never below
+// autoSensMinThresh.
+const (
+	noiseFloorFall    = 0.5
+	noiseFloorRise    = 0.0015
+	autoSensMargin    = 4.0
+	autoSensMinThresh = 0.0015
+)
+
+// updateNoiseFloor advances the worker's noise-floor estimate by one frame. Seeded
+// from the first observed energy, then tracked with the fast-down / slow-up follower.
+// Worker-owned float state; allocation- and lock-free.
+func (w *micWorker) updateNoiseFloor(energy float32) {
+	if !w.floorSeeded {
+		w.noiseFloor = energy
+		w.floorSeeded = true
+		return
+	}
+	if energy < w.noiseFloor {
+		w.noiseFloor += noiseFloorFall * (energy - w.noiseFloor)
+	} else {
+		w.noiseFloor += noiseFloorRise * (energy - w.noiseFloor)
+	}
 }
 
 // gateOverride maps the current MicMode to the gate's force flags:

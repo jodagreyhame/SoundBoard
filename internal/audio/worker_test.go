@@ -6,30 +6,55 @@ import (
 	"time"
 
 	"soundboard/internal/apm"
+	"soundboard/internal/denoise"
 )
 
-// newWorkerFor builds a micWorker bound to an engine with rings, WITHOUT starting
-// its goroutine, so tests can call process() deterministically frame by frame. It
-// mirrors what startWorker constructs: the real WebRTC APM at Discord's config (or
-// a no-op Processor when the APM is unavailable) plus the post-APM hard gate. The
-// NS/AGC toggles are folded in from the engine, exactly as startWorker does, so a
-// test that sets SetAGC/SetNoiseSuppression before building the worker exercises the
-// real APM submodules.
+// newWorkerFor builds a micWorker bound to an engine, WITHOUT starting its goroutine
+// or a denoiser, so tests can call process() deterministically frame by frame. It
+// mirrors what startWorker constructs (the real WebRTC APM at the engine's tier/AGC/
+// echo config, or a no-op Processor when the APM is unavailable, plus the post-APM
+// hard gate) but leaves den nil: with no denoiser the worker uses the ENERGY gate and
+// allocates no RNNoise C state, which is what the APM/energy-path tests want. Tests
+// that exercise the advanced VAD or Strong tier inject a denoiser via newWorkerWithDen.
 func newWorkerFor(e *Engine) *micWorker {
-	cfg := apm.DiscordConfig()
-	ns := e.noiseSuppression()
-	ag := e.agc()
-	cfg.NoiseSuppressionEnabled = ns
-	cfg.GainControlEnabled = ag
-	proc, _ := apm.New(cfg)
+	proc, _ := apm.New(e.buildAPMConfig())
 	return &micWorker{
-		e:          e,
-		apm:        proc,
-		gate:       newGate(),
-		nsApplied:  ns,
-		agcApplied: ag,
-		stop:       make(chan struct{}),
+		e:             e,
+		apm:           proc,
+		gate:          newGate(),
+		nsTierApplied: e.nsTier(),
+		agcApplied:    e.agc(),
+		aecApplied:    e.echoCancellation(),
+		stop:          make(chan struct{}),
 	}
+}
+
+// fakeDenoiser is a test Denoiser that returns a scripted speech probability and,
+// optionally, applies an in-place effect so a test can prove RNNoise ran (Strong
+// tier). It lets the VAD tests drive the gate from a KNOWN probability rather than
+// depending on what the real RNNoise network makes of a synthetic signal.
+type fakeDenoiser struct {
+	prob    float32
+	applied func([]float32)
+	calls   int
+}
+
+func (f *fakeDenoiser) Process(frame []float32) float32 {
+	f.calls++
+	if f.applied != nil {
+		f.applied(frame)
+	}
+	return f.prob
+}
+func (f *fakeDenoiser) Close() {}
+
+// newWorkerWithDen builds a worker with an injected denoiser and the denVAD flag set,
+// so process() takes the advanced-VAD / Strong-tier paths deterministically.
+func newWorkerWithDen(e *Engine, den denoise.Denoiser) *micWorker {
+	w := newWorkerFor(e)
+	w.den = den
+	w.denVAD = true
+	return w
 }
 
 // loudMonoFrame returns a dspFrame-length mono sine well above the gate threshold.
@@ -156,31 +181,215 @@ func TestWorkerPTTMode(t *testing.T) {
 func TestWorkerRoutesTogglesToAPM(t *testing.T) {
 	e := NewEngine(nil, nil)
 	e.SetMicMode("always")
-	e.SetNoiseSuppression(false)
+	e.SetNoiseSuppressionTier("none")
 	e.SetAGC(false)
+	e.SetEchoCancellation(false)
 	w := newWorkerFor(e)
 	defer w.apm.Close()
 
-	if w.nsApplied || w.agcApplied {
-		t.Fatalf("worker should start with NS/AGC off as configured, got ns=%v agc=%v", w.nsApplied, w.agcApplied)
+	if w.nsTierApplied != nsTierNone || w.agcApplied || w.aecApplied {
+		t.Fatalf("worker should start matching engine config, got tier=%d agc=%v aec=%v", w.nsTierApplied, w.agcApplied, w.aecApplied)
 	}
 
-	// Flip both toggles; the next process() must re-apply and update the tracked state.
-	e.SetNoiseSuppression(true)
+	// Flip tier, AGC, and echo; the next process() must re-apply and update the
+	// tracked state in one Reconfigure.
+	e.SetNoiseSuppressionTier("high")
 	e.SetAGC(true)
+	e.SetEchoCancellation(true)
 	frame, _ := sineFrame(220, 0.2, 0)
 	w.process(frame)
-	if !w.nsApplied || !w.agcApplied {
-		t.Fatalf("worker should re-apply APM config after toggles flip, got ns=%v agc=%v", w.nsApplied, w.agcApplied)
+	if w.nsTierApplied != nsTierHigh || !w.agcApplied || !w.aecApplied {
+		t.Fatalf("worker should re-apply APM config after toggles flip, got tier=%d agc=%v aec=%v", w.nsTierApplied, w.agcApplied, w.aecApplied)
 	}
 
 	// Flip back; the next process() re-applies again.
-	e.SetNoiseSuppression(false)
+	e.SetNoiseSuppressionTier("none")
 	e.SetAGC(false)
+	e.SetEchoCancellation(false)
 	frame2, _ := sineFrame(220, 0.2, 0)
 	w.process(frame2)
-	if w.nsApplied || w.agcApplied {
-		t.Fatalf("worker should re-apply APM config after toggles clear, got ns=%v agc=%v", w.nsApplied, w.agcApplied)
+	if w.nsTierApplied != nsTierNone || w.agcApplied || w.aecApplied {
+		t.Fatalf("worker should re-apply APM config after toggles clear, got tier=%d agc=%v aec=%v", w.nsTierApplied, w.agcApplied, w.aecApplied)
+	}
+}
+
+// TestWorkerAdvancedVADGatesOnProbability is the core breathing-fix test at the
+// worker level: with Advanced Voice Activity on, the gate is driven by the RNNoise
+// SPEECH PROBABILITY, not energy. We feed SILENT frames (zero energy — the energy
+// gate could never open on them) and inject a HIGH probability via a fake denoiser:
+// the gate must OPEN, proving the decision is the probability. Then we drop the
+// probability LOW (still silent) and, after the VAD hold elapses, the gate must
+// CLOSE. This is exactly "opens on a speech-like frame, closes on a non-voice frame
+// with correct hold", decoupled from what real RNNoise makes of a synthetic signal.
+func TestWorkerAdvancedVADGatesOnProbability(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.SetMicMode("vad")
+	e.SetAdvancedVoiceActivity(true)
+	e.SetNoiseSuppressionTier("none") // APM NS off so the silent frame stays silent
+	e.SetGateSensitivity(0.15)        // -> VAD open prob 0.6
+
+	fake := &fakeDenoiser{prob: 0.95} // speech-like: well above the 0.6 open threshold
+	w := newWorkerWithDen(e, fake)
+	defer w.apm.Close()
+
+	// Silent frames + high speech probability -> the gate opens despite ZERO energy.
+	for i := 0; i < 30; i++ {
+		frame := make([]float32, dspFrame)
+		w.process(frame)
+	}
+	if gl := e.GateLevel(); gl < 0.9 {
+		t.Fatalf("advanced VAD should open on high speech probability even with silent energy, GateLevel = %v", gl)
+	}
+
+	// Drop the probability below the close threshold (still silent). After the VAD
+	// hold (~25 frames) plus the release ramp, the gate must close.
+	fake.prob = 0.05 // non-voice: below the ~0.35 close threshold
+	for i := 0; i < 300; i++ {
+		frame := make([]float32, dspFrame)
+		w.process(frame)
+	}
+	if gl := e.GateLevel(); gl > 0.05 {
+		t.Fatalf("advanced VAD should close on low speech probability, GateLevel = %v", gl)
+	}
+}
+
+// TestWorkerAdvancedVADIgnoresBreathEnergy proves the fix's intent directly: a
+// LOUD-but-non-speech frame (energy that the old energy gate WOULD open on) keeps
+// the gate CLOSED when the injected speech probability is low. This is the breathing
+// case — breath has energy but is not speech.
+func TestWorkerAdvancedVADIgnoresBreathEnergy(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.SetMicMode("vad")
+	e.SetAdvancedVoiceActivity(true)
+	e.SetNoiseSuppressionTier("none")
+	e.SetGateSensitivity(0.15)
+
+	fake := &fakeDenoiser{prob: 0.1} // breath-like: has energy, not speech
+	w := newWorkerWithDen(e, fake)
+	defer w.apm.Close()
+
+	ph := 0.0
+	for i := 0; i < 80; i++ {
+		var frame []float32
+		frame, ph = loudMonoFrame(ph) // plenty of energy
+		w.process(frame)
+	}
+	if gl := e.GateLevel(); gl > 0.05 {
+		t.Fatalf("advanced VAD must keep the gate closed on energetic non-speech (breath), GateLevel = %v", gl)
+	}
+}
+
+// TestWorkerStrongTierAppliesRNNoiseNotAPM confirms the Strong tier (a) runs the
+// RNNoise denoiser on the TRANSMITTED frame, and (b) does NOT stack it with APM NS.
+// We inject a fake denoiser whose apply effect zeroes the frame; in Strong tier the
+// worker must call it on the real frame (output goes silent), and the APM config the
+// worker builds for that tier must have noise suppression OFF.
+func TestWorkerStrongTierAppliesRNNoiseNotAPM(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.SetMicMode("always") // gate open so we can see the denoised signal
+	e.SetNoiseSuppressionTier("strong")
+
+	// The Strong tier must disable APM noise suppression (never stacked with RNNoise).
+	if enabled, _ := nsConfigForTier(e.nsTier()); enabled {
+		t.Fatal("Strong tier must build an APM config with noise suppression OFF (no stacking)")
+	}
+
+	marker := func(frame []float32) {
+		for i := range frame {
+			frame[i] = 0 // unmistakable in-place effect so we can detect RNNoise ran
+		}
+	}
+	fake := &fakeDenoiser{prob: 0.9, applied: marker}
+	w := newWorkerWithDen(e, fake)
+	defer w.apm.Close()
+
+	frame, _ := sineFrame(220, 0.3, 0)
+	w.process(frame)
+	if fake.calls == 0 {
+		t.Fatal("Strong tier must run the RNNoise denoiser on the transmitted frame")
+	}
+	if r := rms(frame); r > 1e-6 {
+		t.Fatalf("Strong tier should apply the denoiser in place (marker zeroes it), output RMS = %v", r)
+	}
+}
+
+// TestWorkerNonStrongTierDoesNotApplyRNNoise confirms that in the None/Standard/High
+// tiers the denoiser runs (for the VAD probability) on a COPY only — the transmitted
+// frame is the APM output, never the denoised one. The fake's apply effect zeroes its
+// input; if it touched the real frame the (always-open) output would be silent.
+func TestWorkerNonStrongTierDoesNotApplyRNNoise(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.SetMicMode("vad")
+	e.SetAdvancedVoiceActivity(true)
+	e.SetNoiseSuppressionTier("high") // APM NS on; RNNoise used only for the probability
+	e.SetGateSensitivity(0.15)
+
+	marker := func(frame []float32) {
+		for i := range frame {
+			frame[i] = 0
+		}
+	}
+	fake := &fakeDenoiser{prob: 0.95, applied: marker}
+	w := newWorkerWithDen(e, fake)
+	defer w.apm.Close()
+
+	var last []float32
+	ph := 0.0
+	for i := 0; i < 30; i++ {
+		var frame []float32
+		frame, ph = loudMonoFrame(ph)
+		w.process(frame)
+		last = frame
+	}
+	if fake.calls == 0 {
+		t.Fatal("non-Strong tier should still run the denoiser to read the VAD probability")
+	}
+	// The gate is open (high prob) and the transmitted frame is the APM output, NOT the
+	// zeroed copy — so it must be non-silent.
+	if r := rms(last); r < 0.01 {
+		t.Fatalf("non-Strong tier must transmit the APM output, not the denoised copy; output RMS = %v", r)
+	}
+}
+
+// TestWorkerAutoSensitivityTracksNoiseFloor exercises the automatic input-sensitivity
+// path (energy gate): with auto-sensitivity on, a signal well above the tracked noise
+// floor opens the gate while steady low-level noise near the floor does not. It also
+// confirms the manual slider is bypassed (a very high manual sensitivity would block
+// the open if it were used).
+func TestWorkerAutoSensitivityTracksNoiseFloor(t *testing.T) {
+	e := NewEngine(nil, nil)
+	e.SetMicMode("vad")
+	e.SetAdvancedVoiceActivity(false) // energy path
+	e.SetAutoSensitivity(true)
+	e.SetNoiseSuppressionTier("none")
+	e.SetAGC(false)
+	e.SetGateSensitivity(1.0) // manual threshold 0.05; must be BYPASSED in auto mode
+	w := newWorkerFor(e)
+	defer w.apm.Close()
+
+	// Establish a low noise floor with steady low-level tone (a sine survives the APM
+	// high-pass filter, unlike a DC constant). RMS ~0.0021 — quiet room tone.
+	ph := 0.0
+	for i := 0; i < 80; i++ {
+		var frame []float32
+		frame, ph = sineFrame(300, 0.003, ph)
+		w.process(frame)
+	}
+	if gl := e.GateLevel(); gl > 0.2 {
+		t.Fatalf("auto-sensitivity should keep the gate closed on steady near-floor noise, GateLevel = %v", gl)
+	}
+
+	// A MEDIUM signal (RMS ~0.028): above the tracked noise floor (so the AUTO
+	// threshold opens it) but BELOW the maxed manual threshold of 0.05 (so the manual
+	// slider, if it were in force, would keep it shut). The gate opening therefore
+	// proves the automatic threshold — not the slider — is driving the decision.
+	for i := 0; i < 60; i++ {
+		var frame []float32
+		frame, ph = sineFrame(300, 0.04, ph)
+		w.process(frame)
+	}
+	if gl := e.GateLevel(); gl < 0.9 {
+		t.Fatalf("auto-sensitivity should open above the floor even with the manual slider maxed, GateLevel = %v", gl)
 	}
 }
 

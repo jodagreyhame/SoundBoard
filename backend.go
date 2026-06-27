@@ -143,8 +143,13 @@ func newBackend() *Backend {
 	b.engine = engine
 	applyVolumesW(engine, settings)
 	applyProcessingW(engine, settings)
-	if settings.Processing.NoiseSuppression && !apm.Available() {
-		log.Printf("noise suppression enabled in settings but the WebRTC APM is unavailable (%v); it will be a no-op", apm.LoadError())
+	// The APM-backed NS tiers (standard/high) are no-ops without the WebRTC APM; the
+	// "strong" tier uses RNNoise instead, so it is unaffected by APM availability.
+	switch settings.Processing.NoiseSuppressionTier {
+	case config.NSModeStandard, config.NSModeHigh:
+		if !apm.Available() {
+			log.Printf("noise suppression tier %q needs the WebRTC APM, which is unavailable (%v); it will be a no-op", settings.Processing.NoiseSuppressionTier, apm.LoadError())
+		}
 	}
 
 	mic, _ := resolveMicW(capture, settings.MicName)
@@ -373,7 +378,15 @@ func applyVolumesW(engine *audio.Engine, s *config.Settings) {
 func applyProcessingW(engine *audio.Engine, s *config.Settings) {
 	engine.SetMicMode(s.Processing.MicMode)
 	engine.SetGateSensitivity(s.Processing.GateSensitivity)
-	engine.SetNoiseSuppression(s.Processing.NoiseSuppression)
+	// Noise suppression is the TIER now (none/standard/high/strong); the legacy
+	// SetNoiseSuppression bool path is superseded.
+	engine.SetNoiseSuppressionTier(s.Processing.NoiseSuppressionTier)
+	engine.SetEchoCancellation(s.Processing.EchoCancellation)
+	// Advanced VAD + auto-sensitivity default ON; read through the accessors so an
+	// unset (nil) pointer seeds the engine ON rather than OFF.
+	engine.SetAdvancedVoiceActivity(s.Processing.AdvancedVAD())
+	engine.SetAutoSensitivity(s.Processing.AutoSens())
+	engine.SetAttenuationAmount(s.Processing.AttenuationAmount)
 	engine.SetAGC(s.Processing.AGC)
 	engine.SetDucking(s.Processing.Ducking)
 	engine.SetForceThrough(s.Processing.ForceThrough)

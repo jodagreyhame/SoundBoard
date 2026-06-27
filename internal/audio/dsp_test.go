@@ -159,3 +159,90 @@ func TestRMS(t *testing.T) {
 		t.Fatalf("rms(0.5 sine) = %v, want ~%v", r, want)
 	}
 }
+
+// --- Advanced (RNNoise) VAD latch ----------------------------------------------
+
+// TestVADLatchOpensOnSpeechClosesOnNonVoice drives the speech-probability latch with
+// a high probability (speech-like) then a low one (non-voice) and checks it opens
+// then, after the hold window, closes — the core VAD gate decision the breathing fix
+// relies on. It keys purely on the probability, so a non-voice frame WITH energy
+// (breath) would never open it.
+func TestVADLatchOpensOnSpeechClosesOnNonVoice(t *testing.T) {
+	g := newGate()
+	openProb := vadOpenProbFor(0.15) // 0.6 open, ~0.35 close
+
+	// Speech-like probability opens the latch immediately and arms the hold.
+	g.updateLatchVAD(0.9, openProb)
+	if !g.open {
+		t.Fatal("a high speech probability should open the VAD latch")
+	}
+	if g.holdLeft != vadHoldFrames {
+		t.Fatalf("opening should arm the hold to %d frames, got %d", vadHoldFrames, g.holdLeft)
+	}
+
+	// A non-voice probability (below close) must NOT drop the latch until the whole
+	// hold window has elapsed — this is the anti-chop hold that bridges syllables.
+	for i := 0; i < vadHoldFrames-1; i++ {
+		g.updateLatchVAD(0.05, openProb)
+		if !g.open {
+			t.Fatalf("latch closed after only %d hold frames; should hold for %d", i+1, vadHoldFrames)
+		}
+	}
+	g.updateLatchVAD(0.05, openProb) // the final hold frame elapses
+	if g.open {
+		t.Fatal("latch should close once the hold window fully elapses on non-voice")
+	}
+}
+
+// TestVADLatchHysteresis confirms the open/close probabilities differ: a probability
+// in the band [closeProb, openProb) holds the latch's current state rather than
+// toggling it, so a voice hovering near threshold does not chatter the gate.
+func TestVADLatchHysteresis(t *testing.T) {
+	g := newGate()
+	openProb := float32(0.6)
+	closeProb := openProb * vadCloseRatio // ~0.35
+	mid := (openProb + closeProb) / 2     // ~0.475, inside the hysteresis band
+
+	// From closed, a mid-band probability must NOT open it.
+	g.updateLatchVAD(mid, openProb)
+	if g.open {
+		t.Fatal("mid-band probability must not open a closed VAD latch (hysteresis)")
+	}
+
+	// Open it, drain the hold while staying in the band, and it must remain open.
+	g.updateLatchVAD(0.9, openProb)
+	for i := 0; i < vadHoldFrames+2; i++ {
+		g.updateLatchVAD(mid, openProb)
+	}
+	if !g.open {
+		t.Fatal("mid-band probability must keep an open VAD latch open (hysteresis)")
+	}
+
+	// Below the close probability (and past the hold) it finally closes.
+	for i := 0; i < vadHoldFrames+2; i++ {
+		g.updateLatchVAD(closeProb*0.5, openProb)
+	}
+	if g.open {
+		t.Fatal("a probability below the close threshold should close the VAD latch")
+	}
+}
+
+// TestVADOpenProbForMapping pins the sensitivity -> VAD open-probability mapping: the
+// default sensitivity yields the design's 0.6 open point, higher sensitivity demands
+// a higher probability (more aggressive gating), and the result is clamped.
+func TestVADOpenProbForMapping(t *testing.T) {
+	if got := vadOpenProbFor(0.15); math.Abs(float64(got)-0.6) > 1e-5 {
+		t.Fatalf("vadOpenProbFor(0.15) = %v, want ~0.6 (the design open point)", got)
+	}
+	low := vadOpenProbFor(0.0)
+	high := vadOpenProbFor(0.9)
+	if !(low < vadOpenProbFor(0.15) && vadOpenProbFor(0.15) < high) {
+		t.Fatalf("higher sensitivity should raise the open probability: low=%v mid=%v high=%v", low, vadOpenProbFor(0.15), high)
+	}
+	if got := vadOpenProbFor(2); got > vadOpenProbMax+1e-6 {
+		t.Fatalf("vadOpenProbFor must clamp above to %v, got %v", vadOpenProbMax, got)
+	}
+	if got := vadOpenProbFor(-1); got < vadOpenProbMin-1e-6 {
+		t.Fatalf("vadOpenProbFor must clamp below to %v, got %v", vadOpenProbMin, got)
+	}
+}

@@ -23,10 +23,26 @@ const (
 	micModeMute   int32 = 3 // gate forced closed
 )
 
+// nsTier* are the RT-friendly integer encodings of the four config
+// NoiseSuppressionTier strings. The worker reads nsTierBits once per frame instead
+// of comparing strings. SetNoiseSuppressionTier maps the config string to one of
+// these; an unknown string falls back to nsTierHigh (the breathing-kill default).
+const (
+	nsTierNone     int32 = 0 // APM noise suppression off
+	nsTierStandard int32 = 1 // APM NS Moderate (Discord "Standard")
+	nsTierHigh     int32 = 2 // APM NS High (breathing-kill default)
+	nsTierStrong   int32 = 3 // RNNoise denoiser (Krisp analog); APM NS off
+)
+
 // defaultGateSensitivity is the engine-side default gate threshold, mirroring
 // config's default so a freshly constructed Engine (before main applies saved
 // settings) gates a normal speaking voice in but rejects idle room noise.
 const defaultGateSensitivity float32 = 0.15
+
+// defaultAttenAmount is the engine-side default ducking depth used before main
+// applies the saved AttenuationAmount. It matches the historical hardcoded duck
+// depth (~-9 dB) so a bare engine ducks exactly as the pre-parity build did.
+const defaultAttenAmount float32 = 0.65
 
 // SetMicMode selects the gate behavior from a config MicMode string ("vad",
 // "ptt", "always", "mute"). An empty or unrecognized value is treated as "vad".
@@ -79,13 +95,89 @@ func (e *Engine) SetPTTDown(down bool) { e.pttDown.Store(down) }
 // pttIsDown reads the PTT held-state lock-free (RT path helper).
 func (e *Engine) pttIsDown() bool { return e.pttDown.Load() }
 
-// SetNoiseSuppression toggles RNNoise on the mic path. A no-op effect when the
-// build lacks cgo/RNNoise (the worker uses passthrough), so enabling it never
-// breaks the chain. Safe from any goroutine.
-func (e *Engine) SetNoiseSuppression(on bool) { e.noiseSuppressOn.Store(on) }
+// SetNoiseSuppression is the RETAINED LEGACY noise-suppression toggle. It maps the
+// bool onto the new tier system so old callers/config/tests still work: true -> the
+// "standard" tier (APM NS Moderate), false -> "none". The TIER is authoritative;
+// new code should call SetNoiseSuppressionTier. Safe from any goroutine.
+func (e *Engine) SetNoiseSuppression(on bool) {
+	if on {
+		e.nsTierBits.Store(nsTierStandard)
+	} else {
+		e.nsTierBits.Store(nsTierNone)
+	}
+}
 
-// noiseSuppression reads the toggle lock-free (worker helper).
-func (e *Engine) noiseSuppression() bool { return e.noiseSuppressOn.Load() }
+// noiseSuppression reports whether ANY noise suppression is active (tier != none).
+// Kept as the legacy reader; the worker keys off nsTier() for the actual level.
+func (e *Engine) noiseSuppression() bool { return e.nsTier() != nsTierNone }
+
+// SetNoiseSuppressionTier selects the noise-suppression strength from a config
+// NoiseSuppressionTier string ("none"/"standard"/"high"/"strong"). An empty or
+// unrecognized value falls back to "high" (the breathing-kill default). The string
+// is mapped to an int encoding here so the worker never compares strings. Safe from
+// any goroutine; the worker re-applies the APM config on its next frame.
+func (e *Engine) SetNoiseSuppressionTier(tier string) {
+	var t int32
+	switch tier {
+	case "none":
+		t = nsTierNone
+	case "standard":
+		t = nsTierStandard
+	case "strong":
+		t = nsTierStrong
+	default: // "high" and anything unknown
+		t = nsTierHigh
+	}
+	e.nsTierBits.Store(t)
+}
+
+// nsTier reads the current NS tier encoding lock-free (worker helper).
+func (e *Engine) nsTier() int32 { return e.nsTierBits.Load() }
+
+// SetEchoCancellation toggles the APM echo canceller (Discord parity). Safe from
+// any goroutine; the worker re-applies the APM config on its next frame.
+func (e *Engine) SetEchoCancellation(on bool) { e.echoCancelOn.Store(on) }
+
+// echoCancellation reads the echo-cancellation toggle lock-free (worker helper).
+func (e *Engine) echoCancellation() bool { return e.echoCancelOn.Load() }
+
+// SetAdvancedVoiceActivity toggles the RNNoise speech-probability VAD gate in VAD
+// mode. When on (the breathing-fix default) the gate opens on trained speech
+// probability rather than raw energy, so breathing (which has energy) no longer
+// trips it; when off the legacy energy latch is used. A no-op effect when the build
+// lacks cgo/RNNoise (the worker falls back to the energy latch). Safe from any
+// goroutine.
+func (e *Engine) SetAdvancedVoiceActivity(on bool) { e.advancedVADOn.Store(on) }
+
+// advancedVAD reads the advanced-VAD toggle lock-free (worker helper).
+func (e *Engine) advancedVAD() bool { return e.advancedVADOn.Load() }
+
+// SetAutoSensitivity toggles automatic input sensitivity (Discord parity). When on
+// the energy gate's open threshold tracks a noise-floor follower; when off the
+// manual GateSensitivity drives it. Safe from any goroutine.
+func (e *Engine) SetAutoSensitivity(on bool) { e.autoSensOn.Store(on) }
+
+// autoSensitivity reads the auto-sensitivity toggle lock-free (worker helper).
+func (e *Engine) autoSensitivity() bool { return e.autoSensOn.Load() }
+
+// SetAttenuationAmount sets the ducking depth in [0,1] (Discord's attenuation
+// amount). Clamped; NaN maps to 0. The RT duck follower reads it once per buffer.
+// Safe from any goroutine.
+func (e *Engine) SetAttenuationAmount(a float32) {
+	if a != a { // NaN
+		a = 0
+	}
+	if a < 0 {
+		a = 0
+	}
+	if a > 1 {
+		a = 1
+	}
+	e.attenAmountBits.Store(float32bits(a))
+}
+
+// attenuationAmount reads the current ducking depth lock-free (RT path helper).
+func (e *Engine) attenuationAmount() float32 { return float32frombits(e.attenAmountBits.Load()) }
 
 // SetAGC toggles the RMS-target automatic gain leveler on the mic path. Safe from
 // any goroutine.

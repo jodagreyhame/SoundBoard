@@ -465,6 +465,42 @@ html, body {
 .toggle .t-body { flex: 1; min-width: 0; }
 .toggle .t-name { font-size: 13px; font-weight: 600; }
 .toggle .t-desc { font-size: 10.5px; color: var(--faint); margin-top: 2px; line-height: 1.4; }
+/* A toggle used standalone inside a card (not in the 2-col grid): the Automatic
+ * input-sensitivity row and the Attenuation on/off row. */
+.toggle.inline { width: 100%; }
+.toggle.inline .box { font-size: 13px; }
+
+/* Discord-parity: full-width segmented Noise Suppression selector (None / Standard
+ * / High / Strong). Reuses .seg/.seg-btn but stretches each button to fill. */
+.seg-wide { display: flex; width: 100%; }
+.seg-wide .seg-btn { flex: 1; text-align: center; }
+
+/* Input-sensitivity live meter (under the manual threshold slider). */
+.sens-meter { margin-top: 12px; }
+
+/* Attenuation amount block dims while ducking is off. */
+.atten-amount { margin-top: 4px; }
+.atten-amount.disabled { opacity: .5; }
+
+/* Input / Output volume sliders (Discord parity), side by side. */
+.vol-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.vol-grid .v-head { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }
+.vol-grid .v-icon { color: var(--primary); display: flex; }
+.vol-grid .v-label { font-size: 12px; font-weight: 700; flex: 1; }
+.vol-grid .v-pct { font-size: 11px; color: var(--dim); }
+.vol-grid .v-pct.hot { color: var(--warning); }
+
+/* Cosmetic Audio Subsystem dropdown. */
+.subsystem-select {
+  width: 100%; max-width: 280px; height: 38px; padding: 0 12px;
+  background: var(--elev); color: var(--fg);
+  border: 1px solid var(--line2); border-radius: 10px;
+  font-family: inherit; font-weight: 600; font-size: 13px; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%239a9aa7' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+}
+.subsystem-select:focus { outline: none; border-color: var(--primary); }
 
 /* Discord checklist. */
 .check-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }

@@ -70,11 +70,29 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if s.Processing.GateSensitivity != defaultGateSensitivity {
 		t.Errorf("Load() defaults: Processing.GateSensitivity = %v, want %v", s.Processing.GateSensitivity, defaultGateSensitivity)
 	}
-	if s.Processing.NoiseSuppression || s.Processing.AGC || s.Processing.Ducking || s.Processing.ForceThrough {
-		t.Errorf("Load() defaults: all processing toggles should be off, got %+v", s.Processing)
+	if s.Processing.NoiseSuppression || s.Processing.AGC || s.Processing.Ducking || s.Processing.ForceThrough || s.Processing.EchoCancellation {
+		t.Errorf("Load() defaults: all plain processing toggles should be off, got %+v", s.Processing)
 	}
 	if s.Processing.PTTHotkey != "" {
 		t.Errorf("Load() defaults: Processing.PTTHotkey = %q, want empty", s.Processing.PTTHotkey)
+	}
+	// Discord-parity breathing-fix defaults on a FRESH config: NS tier "high",
+	// Advanced Voice Activity ON, Auto-sensitivity ON, attenuation depth 0.5, and a
+	// "standard" audio subsystem.
+	if s.Processing.NoiseSuppressionTier != NSModeHigh {
+		t.Errorf("Load() defaults: NoiseSuppressionTier = %q, want %q", s.Processing.NoiseSuppressionTier, NSModeHigh)
+	}
+	if !s.Processing.AdvancedVAD() {
+		t.Error("Load() defaults: AdvancedVoiceActivity should default ON (the breathing fix)")
+	}
+	if !s.Processing.AutoSens() {
+		t.Error("Load() defaults: AutoSensitivity should default ON")
+	}
+	if s.Processing.AttenuationAmount != defaultAttenuationAmount {
+		t.Errorf("Load() defaults: AttenuationAmount = %v, want %v", s.Processing.AttenuationAmount, defaultAttenuationAmount)
+	}
+	if s.Processing.AudioSubsystem != AudioSubsystemStandard {
+		t.Errorf("Load() defaults: AudioSubsystem = %q, want %q", s.Processing.AudioSubsystem, AudioSubsystemStandard)
 	}
 }
 
@@ -161,6 +179,136 @@ func TestProcessingNormalizeEdges(t *testing.T) {
 	}
 }
 
+// TestNoiseSuppressionTierBackCompat pins the upgrade path: a config saved by a
+// prior version (it has a MicMode but NO noiseSuppressionTier) must derive its
+// tier from the legacy NoiseSuppression bool so the user's prior choice is
+// respected — true -> "standard", false -> "none" — rather than being force-reset
+// to the aggressive fresh-install "high" default.
+func TestNoiseSuppressionTierBackCompat(t *testing.T) {
+	cases := []struct {
+		name     string
+		legacyNS bool
+		wantTier string
+	}{
+		{"legacy NS on -> standard", true, NSModeStandard},
+		{"legacy NS off -> none", false, NSModeNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// MicMode set (no tier) marks this as an upgraded config.
+			p := AudioProcessing{MicMode: MicModeVAD, NoiseSuppression: tc.legacyNS}
+			p.normalize()
+			if p.NoiseSuppressionTier != tc.wantTier {
+				t.Errorf("upgraded tier = %q, want %q", p.NoiseSuppressionTier, tc.wantTier)
+			}
+		})
+	}
+
+	// A FRESH config (no MicMode, no tier) defaults to the aggressive breathing-kill
+	// tier regardless of the legacy bool's zero value.
+	fresh := AudioProcessing{}
+	fresh.normalize()
+	if fresh.NoiseSuppressionTier != NSModeHigh {
+		t.Errorf("fresh tier = %q, want %q", fresh.NoiseSuppressionTier, NSModeHigh)
+	}
+
+	// An explicit tier always wins over the legacy bool (tier is authoritative once set).
+	explicit := AudioProcessing{MicMode: MicModeVAD, NoiseSuppression: false, NoiseSuppressionTier: NSModeStrong}
+	explicit.normalize()
+	if explicit.NoiseSuppressionTier != NSModeStrong {
+		t.Errorf("explicit tier = %q, want %q (tier authoritative)", explicit.NoiseSuppressionTier, NSModeStrong)
+	}
+
+	// An invalid stored tier coerces to the default.
+	bad := AudioProcessing{MicMode: MicModeVAD, NoiseSuppressionTier: "bogus"}
+	bad.normalize()
+	if bad.NoiseSuppressionTier != NSModeHigh {
+		t.Errorf("invalid tier coerced to %q, want %q", bad.NoiseSuppressionTier, NSModeHigh)
+	}
+}
+
+// TestAdvancedToggleExplicitFalseRoundTrips is the regression for "a user who
+// turns OFF Advanced Voice Activity / Auto-sensitivity finds it back ON after a
+// restart". These default ON (the breathing fix), so a deliberate OFF must persist:
+// the *bool stores an explicit false that survives Save/Load, while a genuinely
+// unset (nil) value defaults to ON via normalize.
+func TestAdvancedToggleExplicitFalseRoundTrips(t *testing.T) {
+	pointConfigDir(t)
+
+	stored := &Settings{
+		Hotkeys: map[string]string{},
+		Processing: AudioProcessing{
+			MicMode:               MicModeVAD,
+			AdvancedVoiceActivity: BoolPtr(false),
+			AutoSensitivity:       BoolPtr(false),
+		},
+	}
+	if err := stored.Save(); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got.Processing.AdvancedVoiceActivity == nil || *got.Processing.AdvancedVoiceActivity {
+		t.Errorf("AdvancedVoiceActivity = %v, want explicit false (deliberate OFF preserved)", got.Processing.AdvancedVoiceActivity)
+	}
+	if got.Processing.AdvancedVAD() {
+		t.Error("AdvancedVAD() = true, want false (explicit OFF must NOT coerce back ON)")
+	}
+	if got.Processing.AutoSensitivity == nil || *got.Processing.AutoSensitivity {
+		t.Errorf("AutoSensitivity = %v, want explicit false", got.Processing.AutoSensitivity)
+	}
+	if got.Processing.AutoSens() {
+		t.Error("AutoSens() = true, want false (explicit OFF must NOT coerce back ON)")
+	}
+
+	// And a nil (unset) toggle must default ON through the accessor.
+	none := AudioProcessing{}
+	if !none.AdvancedVAD() || !none.AutoSens() {
+		t.Error("unset toggles must report ON via accessors (nil -> default true)")
+	}
+}
+
+// TestProcessingNormalizeNewEdges pins the remaining new-field normalize branches:
+// AttenuationAmount 0->default, negative clamp, over-range clamp, in-range
+// preserved; and AudioSubsystem empty/invalid->"standard", valid preserved.
+func TestProcessingNormalizeNewEdges(t *testing.T) {
+	// AttenuationAmount.
+	atten := []struct {
+		in, want float32
+	}{
+		{0, defaultAttenuationAmount}, // unset -> default
+		{-2, 0},                       // below range -> 0
+		{5, 1},                        // above range -> 1
+		{0.3, 0.3},                    // in range -> preserved
+	}
+	for _, tc := range atten {
+		p := AudioProcessing{MicMode: MicModeVAD, AttenuationAmount: tc.in}
+		p.normalize()
+		if p.AttenuationAmount != tc.want {
+			t.Errorf("AttenuationAmount(%v) = %v, want %v", tc.in, p.AttenuationAmount, tc.want)
+		}
+	}
+
+	// AudioSubsystem: empty/invalid coerce to "standard"; each valid value survives.
+	for _, in := range []string{"", "bogus", "STANDARD"} {
+		p := AudioProcessing{AudioSubsystem: in}
+		p.normalize()
+		if p.AudioSubsystem != AudioSubsystemStandard {
+			t.Errorf("AudioSubsystem %q -> %q, want %q", in, p.AudioSubsystem, AudioSubsystemStandard)
+		}
+	}
+	for _, sub := range []string{AudioSubsystemStandard, AudioSubsystemLegacy, AudioSubsystemExperimental} {
+		p := AudioProcessing{AudioSubsystem: sub}
+		p.normalize()
+		if p.AudioSubsystem != sub {
+			t.Errorf("AudioSubsystem %q not preserved, got %q", sub, p.AudioSubsystem)
+		}
+	}
+}
+
 // TestFavoritesRoundTrip pins that a non-empty, ORDERED favourites list survives
 // a Save/Load cycle unchanged. Order matters: the UI pins favourites in this
 // sequence, so a reordering bug would silently reshuffle the user's section.
@@ -213,14 +361,20 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		// non-default MicMode, a custom gate sensitivity, and the non-default
 		// MonitorSource (the confidence-monitor setting).
 		Processing: AudioProcessing{
-			NoiseSuppression: true,
-			AGC:              true,
-			Ducking:          true,
-			MicMode:          MicModePTT,
-			GateSensitivity:  0.42,
-			ForceThrough:     true,
-			PTTHotkey:        "ctrl+grave",
-			MonitorSource:    MonitorSourceTransmitted,
+			NoiseSuppression:      true,
+			NoiseSuppressionTier:  NSModeStrong,
+			EchoCancellation:      true,
+			AGC:                   true,
+			Ducking:               true,
+			AttenuationAmount:     0.75,
+			MicMode:               MicModePTT,
+			AdvancedVoiceActivity: BoolPtr(false), // explicit OFF must round-trip
+			AutoSensitivity:       BoolPtr(false), // explicit OFF must round-trip
+			GateSensitivity:       0.42,
+			ForceThrough:          true,
+			PTTHotkey:             "ctrl+grave",
+			MonitorSource:         MonitorSourceTransmitted,
+			AudioSubsystem:        AudioSubsystemExperimental,
 		},
 	}
 

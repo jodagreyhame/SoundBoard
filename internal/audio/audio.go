@@ -228,13 +228,28 @@ type Engine struct {
 	// read by duplexCallback's DSP — the heavy worker + ring buffers land in
 	// phase 2. The setters and GateLevel are live now so config, UI, and hotkeys
 	// can be wired against stable signatures.
-	micModeBits     atomic.Int32  // gate mode enum (see micMode* consts)
-	gateSensBits    atomic.Uint32 // gate threshold float32 bits, [0,1]
-	pttDown         atomic.Bool   // true while the PTT hotkey is held
-	noiseSuppressOn atomic.Bool   // run RNNoise on the mic when true
-	agcOn           atomic.Bool   // run the RMS-target leveler when true
-	duckingOn       atomic.Bool   // duck clips under an open mic gate when true
-	gateLevelBits   atomic.Uint32 // published gate-open level float32 bits, [0,1]
+	micModeBits   atomic.Int32  // gate mode enum (see micMode* consts)
+	gateSensBits  atomic.Uint32 // gate threshold float32 bits, [0,1]
+	pttDown       atomic.Bool   // true while the PTT hotkey is held
+	agcOn         atomic.Bool   // run the RMS-target leveler when true
+	duckingOn     atomic.Bool   // duck clips under an open mic gate when true
+	gateLevelBits atomic.Uint32 // published gate-open level float32 bits, [0,1]
+
+	// --- Discord Voice & Video parity control surface (the breathing fix) ---
+	//
+	// Like the toggles above, these are atomic so any goroutine (UI, hotkeys) may
+	// set them and the DSP worker reads each once per frame via a single atomic
+	// load — no lock, no allocation on (or near) the audio thread.
+	//
+	// nsTierBits supersedes the old noiseSuppressOn bool: noise suppression is now a
+	// TIER (none/standard/high/strong, see nsTier* consts). The worker maps it to the
+	// APM noise-suppression submodule (and, for "strong", to RNNoise). The other four
+	// mirror the new config.AudioProcessing parity fields.
+	nsTierBits      atomic.Int32  // NS tier enum (see nsTier* consts)
+	echoCancelOn    atomic.Bool   // APM echo cancellation (parity; inert w/o render ref)
+	advancedVADOn   atomic.Bool   // VAD gate uses the RNNoise speech probability when true
+	autoSensOn      atomic.Bool   // automatic input sensitivity (else the manual slider)
+	attenAmountBits atomic.Uint32 // ducking depth float32 bits, [0,1]
 
 	// pending / monPending hand clips from Trigger to the RT callbacks. Each
 	// callback drains its own channel; the slices below are touched only by
@@ -307,6 +322,15 @@ func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 	// overrides these from saved settings at startup via the Set* methods.
 	e.micModeBits.Store(micModeVAD)
 	e.gateSensBits.Store(float32bits(defaultGateSensitivity))
+	// Parity control-surface engine defaults. These are the BARE-engine baseline;
+	// main overrides every one from saved settings via applyProcessingW at startup.
+	// The tier starts at "none" (so a fresh engine reports noiseSuppression()==false,
+	// the historical baseline) and advanced-VAD / auto-sensitivity start OFF so a bare
+	// engine keeps using the energy gate until main seeds the config defaults. The
+	// attenuation depth starts at the historical 0.65 so ducking behaves exactly as
+	// the pre-parity build until main applies the saved amount.
+	e.nsTierBits.Store(nsTierNone)
+	e.attenAmountBits.Store(float32bits(defaultAttenAmount))
 	return e
 }
 

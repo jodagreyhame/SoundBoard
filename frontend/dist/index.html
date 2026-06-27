@@ -163,13 +163,19 @@
           </div>
 
           <!-- -------------------- MIC &amp; AUDIO VIEW -------------------- -->
+          <!-- Mirrors Discord's Voice & Video audio controls, in Discord's order:
+               Input/Output volume, Input mode, Input sensitivity (auto + manual),
+               Noise suppression (None/Standard/High/Strong segmented), Echo
+               cancellation, Automatic gain control, Advanced voice activity,
+               Attenuation (toggle + amount), Audio subsystem. Each control is wired
+               in app.js to a bound App.Set* method (applies instantly + persists). -->
           <div id="view-audio" class="view scroll audio-scroll hidden">
             <div class="audio-title">Mic &amp; Audio</div>
-            <div class="audio-sub">Cleans your voice before it reaches Discord. Clips are never processed.</div>
+            <div class="audio-sub">Mirrors Discord’s Voice &amp; Video controls — your voice is cleaned before it reaches Discord. Soundboard clips are never processed.</div>
 
             <div class="audio-grid">
 
-              <!-- LEFT: input mode + gate -->
+              <!-- LEFT: input mode + input sensitivity -->
               <div class="col">
                 <div class="card">
                   <div class="card-title">Input mode</div>
@@ -186,11 +192,20 @@
 
                 <div class="card">
                   <div class="gate-head">
-                    <span class="g-title">Gate sensitivity</span>
+                    <span class="g-title">Input sensitivity</span>
                     <span id="gate-val" class="mono g-val">15%</span>
                   </div>
-                  <input id="gate" type="range" class="rng" min="0" max="100" step="1" value="15" style="width:100%;">
+                  <!-- "Automatically determine input sensitivity" (Discord parity). -->
+                  <div id="autosens-toggle" class="toggle inline" role="switch" aria-checked="true">
+                    <span class="box"></span>
+                    <div class="t-body">
+                      <div class="t-name">Automatically determine input sensitivity</div>
+                      <div class="t-desc">Tracks your noise floor for you. Turn off to set the threshold by hand.</div>
+                    </div>
+                  </div>
+                  <input id="gate" type="range" class="rng" min="0" max="100" step="1" value="15" style="width:100%;margin-top:14px;">
                   <div class="gate-ends"><span>opens easily</span><span>needs louder voice</span></div>
+                  <div class="meter-bar sens-meter"><div id="sens-fill" class="fill"></div></div>
                 </div>
               </div>
 
@@ -213,11 +228,88 @@
                 <div class="meter-foot">Speak — the ring fills <b>green</b> when the gate opens.</div>
               </div>
 
-              <!-- Processing toggles (full width) -->
+              <!-- NOISE SUPPRESSION — segmented None / Standard / High / Strong
+                   (single selector; the tiers never stack). Wired to
+                   App.SetNoiseSuppressionTier; seeded from audio.noiseSuppressionTier. -->
+              <div class="card full">
+                <div class="card-title" style="margin-bottom:4px;">Noise suppression</div>
+                <div class="proc-sub">Removes background noise — and the breathing Discord’s Krisp used to strip — before your voice reaches Discord. One tier at a time.</div>
+                <div id="nstier-seg" class="seg seg-wide" role="group" aria-label="Noise suppression">
+                  <button class="seg-btn" type="button" data-tier="none">None</button>
+                  <button class="seg-btn" type="button" data-tier="standard">Standard</button>
+                  <button class="seg-btn" type="button" data-tier="high">High</button>
+                  <button class="seg-btn" type="button" data-tier="strong">Strong</button>
+                </div>
+                <div id="nstier-cap" class="monsrc-cap"></div>
+              </div>
+
+              <!-- Processing toggles: Advanced voice activity, Echo cancellation,
+                   Automatic gain control (full width). -->
               <div class="card full">
                 <div class="card-title" style="margin-bottom:4px;">Processing</div>
-                <div class="proc-sub">Clean, gated, leveled voice — applied to your mic only, before Discord. Leave Discord’s own noise suppression OFF.</div>
+                <div class="proc-sub">Applied to your mic only, before Discord. Leave Discord’s own noise suppression, echo cancellation and AGC OFF.</div>
                 <div id="toggle-grid" class="toggle-grid"></div>
+              </div>
+
+              <!-- ATTENUATION — toggle + amount (Discord's "lower other sounds"). -->
+              <div class="card full">
+                <div class="card-title" style="margin-bottom:4px;">Attenuation</div>
+                <div class="proc-sub">Lowers soundboard clips while you’re talking, like Discord’s “lower the volume of other sounds”.</div>
+                <div id="atten-toggle" class="toggle inline" role="switch" aria-checked="false">
+                  <span class="box"></span>
+                  <div class="t-body">
+                    <div class="t-name">Lower other sounds while talking</div>
+                    <div class="t-desc">Ducks soundboard clips under your live voice.</div>
+                  </div>
+                </div>
+                <div id="atten-amount-block" class="atten-amount">
+                  <div class="gate-head" style="margin-top:14px;">
+                    <span class="g-title">Attenuation amount</span>
+                    <span id="atten-val" class="mono g-val">50%</span>
+                  </div>
+                  <input id="atten-amount" type="range" class="rng" min="0" max="100" step="1" value="50" style="width:100%;">
+                  <div class="gate-ends"><span>subtle</span><span>full duck</span></div>
+                </div>
+              </div>
+
+              <!-- INPUT / OUTPUT VOLUME (Discord parity). Input drives the mic level
+                   into Discord; output is what YOU hear locally. Same channels as the
+                   soundboard mixer dock, surfaced here under Discord's labels. -->
+              <div class="card full">
+                <div class="card-title" style="margin-bottom:4px;">Volume</div>
+                <div class="proc-sub">Input volume is your mic level into Discord; output volume is what you hear locally (the soundboard “others hear” master stays in the mixer).</div>
+                <div class="vol-grid">
+                  <div class="vol">
+                    <div class="v-head">
+                      <span class="v-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg></span>
+                      <span class="v-label">Input volume</span>
+                      <span id="vol-input-val" class="v-pct">100%</span>
+                    </div>
+                    <input id="vol-input" type="range" class="rng" min="0" max="200" step="1" value="100" style="width:100%;">
+                  </div>
+                  <div class="vol">
+                    <div class="v-head">
+                      <span class="v-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14v-2a9 9 0 0 1 18 0v2M21 14v3a2 2 0 0 1-2 2h-1v-6h1a2 2 0 0 1 2 1zM3 14a2 2 0 0 1 2-1h1v6H5a2 2 0 0 1-2-2z"/></svg></span>
+                      <span class="v-label">Output volume</span>
+                      <span id="vol-output-val" class="v-pct">100%</span>
+                    </div>
+                    <input id="vol-output" type="range" class="rng" min="0" max="200" step="1" value="100" style="width:100%;">
+                  </div>
+                </div>
+              </div>
+
+              <!-- AUDIO SUBSYSTEM — cosmetic parity dropdown. -->
+              <div class="card full">
+                <div class="check-head">
+                  <span class="ch-title">Audio subsystem</span>
+                  <span class="ch-badge">PARITY</span>
+                </div>
+                <div class="proc-sub">Cosmetic — SoundBoard uses a single WASAPI backend. Kept to mirror Discord’s Standard / Legacy / Experimental setting.</div>
+                <select id="subsystem-select" class="subsystem-select">
+                  <option value="standard">Standard</option>
+                  <option value="legacy">Legacy</option>
+                  <option value="experimental">Experimental</option>
+                </select>
               </div>
 
               <!-- Discord checklist (full width) -->

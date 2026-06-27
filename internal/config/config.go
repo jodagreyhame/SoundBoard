@@ -77,27 +77,72 @@ const (
 // mixed into the cable; triggered soundboard clips are summed in AFTER this chain
 // and are never denoised, gated, or leveled.
 //
-// Defaults (filled by normalize when unset): NoiseSuppression off, AGC off,
-// Ducking off, MicMode "vad", GateSensitivity ~0.15, ForceThrough off, no PTT
-// hotkey. With everything at its default the suite gates the mic by voice
-// activity and otherwise passes clean voice through, so the user can run Discord
-// with all of Discord's own processing OFF.
+// Defaults (filled by normalize when unset): MicMode "vad", GateSensitivity
+// ~0.15, AGC off, Ducking off, ForceThrough off, EchoCancellation off, no PTT
+// hotkey, MonitorSource "clips", AudioSubsystem "standard". The Discord-parity
+// breathing fix sets three NON-off defaults on a FRESH config: NoiseSuppressionTier
+// "high", AdvancedVoiceActivity ON, and AutoSensitivity ON, plus AttenuationAmount
+// 0.5. On an UPGRADED config the tier is derived from the legacy NoiseSuppression
+// bool so a prior explicit choice is respected.
 type AudioProcessing struct {
-	// NoiseSuppression runs RNNoise on the mic frames when true. A no-op when the
-	// build lacks cgo/RNNoise (the engine falls back to passthrough), so enabling
-	// it is always safe.
+	// NoiseSuppression is the RETAINED LEGACY noise-suppression toggle (pre-tier
+	// configs stored a single bool). It is kept so old configs round-trip and so
+	// normalize() can derive NoiseSuppressionTier from it on upgrade (true ->
+	// "standard", false -> "none"). Once NoiseSuppressionTier is set, the TIER is
+	// authoritative and this bool is vestigial. The engine binding (SetNoiseSuppression)
+	// still maps to/from this bool for back-compat.
 	NoiseSuppression bool `json:"noiseSuppression,omitempty"`
+	// NoiseSuppressionTier selects the noise-suppression strength, the Discord
+	// "Noise Suppression" control's parity field. One of "none" | "standard" |
+	// "high" | "strong":
+	//   - none     -> APM noise suppression off.
+	//   - standard -> APM NS Moderate (Discord "Standard").
+	//   - high     -> APM NS High/VeryHigh (default; aggressive enough to shave
+	//                 breath riding under the voice).
+	//   - strong   -> RNNoise denoiser, our Krisp analog; APM NS auto-disables so
+	//                 the two are never stacked.
+	// normalize() defaults an UNSET tier on a FRESH config to "high" (the
+	// breathing-kill default); on an UPGRADED config (one that already had a
+	// processing block) it derives the tier from the legacy NoiseSuppression bool.
+	// An unrecognized value coerces to "high".
+	NoiseSuppressionTier string `json:"noiseSuppressionTier,omitempty"`
+	// EchoCancellation toggles the APM acoustic echo canceller (Discord "Echo
+	// Cancellation"). Exposed for parity; it is inert without a far-end render
+	// reference (the engine never feeds process_reverse_stream), so it is documented
+	// as a parity/no-op control. Default off.
+	EchoCancellation bool `json:"echoCancellation,omitempty"`
 	// AGC enables the RMS-target automatic gain leveler on the mic.
 	AGC bool `json:"agc,omitempty"`
-	// Ducking lowers soundboard clips slightly while the mic gate is open (and
-	// vice-versa) via an envelope follower.
+	// Ducking is the ATTENUATION toggle (Discord "Attenuation"): it lowers
+	// soundboard clips while the mic gate is open (and vice-versa) via an envelope
+	// follower. The attenuation DEPTH is AttenuationAmount.
 	Ducking bool `json:"ducking,omitempty"`
+	// AttenuationAmount is the attenuation depth in [0,1] applied while ducking is
+	// active (Discord's "Attenuation amount" slider); 0 = no duck, 1 = full duck.
+	// normalize() defaults 0 to 0.5 and clamps to [0,1].
+	AttenuationAmount float32 `json:"attenuationAmount,omitempty"`
 	// MicMode selects the gate behavior: one of "vad", "ptt", "always", "mute".
 	// normalize() defaults an empty/invalid value to "vad".
 	MicMode string `json:"micMode,omitempty"`
+	// AdvancedVoiceActivity selects the VAD-gate implementation in "vad" MicMode:
+	// when true (the default), the gate is driven by the RNNoise speech-activity
+	// probability (a trained discriminator that does NOT open for breathing); when
+	// false, the legacy energy/RMS latch is used. This is the breathing fix, so it
+	// defaults ON. A *bool so a deliberate OFF round-trips: nil (unset) means the
+	// default (true); a non-nil false is the user's explicit choice. Use
+	// AdvancedVAD() to read the effective value. normalize() seeds nil to true.
+	AdvancedVoiceActivity *bool `json:"advancedVoiceActivity,omitempty"`
+	// AutoSensitivity is Discord's "Automatically determine input sensitivity"
+	// toggle: when true (the default) the gate threshold tracks a noise-floor
+	// follower; when false the manual GateSensitivity is used. A *bool so a
+	// deliberate OFF round-trips (nil = default true). Use AutoSens() to read the
+	// effective value. normalize() seeds nil to true.
+	AutoSensitivity *bool `json:"autoSensitivity,omitempty"`
 	// GateSensitivity is the VAD/RMS gate threshold in [0,1]; higher = the gate
-	// requires a louder voice to open. normalize() defaults 0 to ~0.15 and clamps
-	// to [0,1].
+	// requires a louder voice to open. In "vad" mode with AdvancedVoiceActivity on
+	// it biases the speech-probability open threshold; otherwise it is the energy
+	// threshold. This is the Discord "Input Sensitivity" manual slider value.
+	// normalize() defaults 0 to ~0.15 and clamps to [0,1].
 	GateSensitivity float32 `json:"gateSensitivity,omitempty"`
 	// ForceThrough is a RETAINED-BUT-INERT setting. It formerly enabled a continuous
 	// voiced "carrier" bed on the CABLE path to hold Discord's voice-activity gate
@@ -115,7 +160,87 @@ type AudioProcessing struct {
 	// normalize() defaults an empty/invalid value to "clips". This is a monitor
 	// auditing aid only; it never changes what is transmitted to Discord.
 	MonitorSource string `json:"monitorSource,omitempty"`
+	// AudioSubsystem mirrors Discord's "Audio Subsystem" selector: one of
+	// "standard" | "legacy" | "experimental". COSMETIC for us — the engine has a
+	// single malgo/WASAPI backend, so this is persisted for UI/parity only and has
+	// no audio effect. normalize() coerces an empty/invalid value to "standard".
+	AudioSubsystem string `json:"audioSubsystem,omitempty"`
 }
+
+// Noise-suppression tiers (Discord "Noise Suppression": None / Standard / Krisp,
+// mapped to our engine). Stored lowercase so the config stays human-editable and
+// forward-compatible. normalize() validates against this set.
+const (
+	// NSModeNone disables noise suppression (APM NS off).
+	NSModeNone = "none"
+	// NSModeStandard maps to APM NS Moderate (Discord "Standard").
+	NSModeStandard = "standard"
+	// NSModeHigh maps to APM NS High/VeryHigh (the breathing-kill default).
+	NSModeHigh = "high"
+	// NSModeStrong runs the RNNoise denoiser (our Krisp analog); APM NS is disabled
+	// so the two are never stacked.
+	NSModeStrong = "strong"
+)
+
+// validNSMode reports whether m is one of the four recognized NS tiers.
+func validNSMode(m string) bool {
+	switch m {
+	case NSModeNone, NSModeStandard, NSModeHigh, NSModeStrong:
+		return true
+	}
+	return false
+}
+
+// Audio subsystems (Discord "Audio Subsystem"). Cosmetic for us; persisted for
+// parity only. normalize() validates against this set.
+const (
+	AudioSubsystemStandard     = "standard"
+	AudioSubsystemLegacy       = "legacy"
+	AudioSubsystemExperimental = "experimental"
+)
+
+// validAudioSubsystem reports whether s is one of the three recognized subsystems.
+func validAudioSubsystem(s string) bool {
+	switch s {
+	case AudioSubsystemStandard, AudioSubsystemLegacy, AudioSubsystemExperimental:
+		return true
+	}
+	return false
+}
+
+// defaultNoiseSuppressionTier is the tier seeded for a FRESH config. High is
+// chosen deliberately to suppress breathing that survives during open speech;
+// this is the core of the Discord breathing-parity fix.
+const defaultNoiseSuppressionTier = NSModeHigh
+
+// defaultAttenuationAmount is the ducking depth used when none is configured
+// (≈ −6 dB). Mirrors the Discord default attenuation feel.
+const defaultAttenuationAmount float32 = 0.5
+
+// BoolPtr returns a pointer to a copy of v. Callers use it to set an EXPLICIT
+// AdvancedVoiceActivity / AutoSensitivity value — including an explicit false —
+// so the value round-trips through JSON instead of being treated as unset and
+// coerced back to the default (true).
+func BoolPtr(v bool) *bool { return &v }
+
+// orTrue returns the pointed-to value, or true when p is nil (unset). Centralizes
+// the "nil means default-on, explicit false means the user turned it off" rule for
+// the AdvancedVoiceActivity and AutoSensitivity toggles.
+func orTrue(p *bool) bool {
+	if p == nil {
+		return true
+	}
+	return *p
+}
+
+// AdvancedVAD reports the effective Advanced-Voice-Activity setting: the explicit
+// value when set (including an explicit false), else the default (true). Callers
+// (engine seeding, UI) use this so an unset config defaults ON without a nil deref.
+func (p AudioProcessing) AdvancedVAD() bool { return orTrue(p.AdvancedVoiceActivity) }
+
+// AutoSens reports the effective Automatic-input-sensitivity setting: the explicit
+// value when set (including an explicit false), else the default (true).
+func (p AudioProcessing) AutoSens() bool { return orTrue(p.AutoSensitivity) }
 
 // MonitorSource names the two monitor-source modes. Stored as a lowercase string
 // in the config so it is human-editable and forward-compatible. normalize()
@@ -241,6 +366,14 @@ func (s *Settings) normalize() {
 // value is clamped to [0,1] so the engine never sees an out-of-range threshold.
 // The bool toggles default to false (off), matching the contract.
 func (p *AudioProcessing) normalize() {
+	// Detect whether this config already had a processing block BEFORE we coerce
+	// the mic mode. Every config saved by a prior version wrote a non-empty MicMode
+	// ("vad"/"ptt"/...), so a non-empty MicMode here means "upgraded config"; an
+	// empty MicMode means a fresh/missing config. This disambiguates the
+	// NoiseSuppressionTier default (fresh -> aggressive "high"; upgrade -> derive
+	// from the user's prior NoiseSuppression bool so their choice is respected).
+	upgraded := p.MicMode != ""
+
 	if !validMicMode(p.MicMode) {
 		p.MicMode = MicModeVAD
 	}
@@ -253,6 +386,49 @@ func (p *AudioProcessing) normalize() {
 	if p.GateSensitivity > 1 {
 		p.GateSensitivity = 1
 	}
+
+	// NoiseSuppressionTier: fresh config -> "high" (breathing-kill default);
+	// upgraded config without a tier -> derive from the legacy bool; an invalid
+	// stored tier -> "high".
+	if p.NoiseSuppressionTier == "" {
+		switch {
+		case upgraded && p.NoiseSuppression:
+			p.NoiseSuppressionTier = NSModeStandard
+		case upgraded:
+			p.NoiseSuppressionTier = NSModeNone
+		default:
+			p.NoiseSuppressionTier = defaultNoiseSuppressionTier
+		}
+	}
+	if !validNSMode(p.NoiseSuppressionTier) {
+		p.NoiseSuppressionTier = defaultNoiseSuppressionTier
+	}
+
+	// AttenuationAmount: 0 -> default, clamp to [0,1].
+	if p.AttenuationAmount == 0 {
+		p.AttenuationAmount = defaultAttenuationAmount
+	}
+	if p.AttenuationAmount < 0 {
+		p.AttenuationAmount = 0
+	}
+	if p.AttenuationAmount > 1 {
+		p.AttenuationAmount = 1
+	}
+
+	// AudioSubsystem: empty/invalid -> "standard" (cosmetic).
+	if !validAudioSubsystem(p.AudioSubsystem) {
+		p.AudioSubsystem = AudioSubsystemStandard
+	}
+
+	// Advanced VAD and Auto-sensitivity default ON; a nil pointer is unset, an
+	// explicit false is the user's deliberate OFF and is preserved verbatim.
+	if p.AdvancedVoiceActivity == nil {
+		p.AdvancedVoiceActivity = BoolPtr(true)
+	}
+	if p.AutoSensitivity == nil {
+		p.AutoSensitivity = BoolPtr(true)
+	}
+
 	if !validMonitorSource(p.MonitorSource) {
 		p.MonitorSource = MonitorSourceClips
 	}

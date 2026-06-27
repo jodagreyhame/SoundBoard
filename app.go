@@ -220,7 +220,9 @@ type Volumes struct {
 	Monitor float64 `json:"monitor"`
 }
 
-// AudioState is the mic-processing suite snapshot.
+// AudioState is the mic-processing suite snapshot — the Discord Voice & Video
+// parity control set. The legacy NoiseSuppression bool is retained for back-compat;
+// NoiseSuppressionTier is the authoritative noise-suppression control.
 type AudioState struct {
 	MicMode          string  `json:"micMode"`
 	GateSensitivity  float64 `json:"gateSensitivity"`
@@ -232,6 +234,20 @@ type AudioState struct {
 	// (default — clean clips only) or "transmitted" (the confidence monitor — the
 	// exact mix sent to the cable, so the user can audit what Discord hears).
 	MonitorSource string `json:"monitorSource"`
+
+	// --- Discord Voice & Video parity fields ---
+	// NoiseSuppressionTier: "none" | "standard" | "high" | "strong".
+	NoiseSuppressionTier string `json:"noiseSuppressionTier"`
+	// EchoCancellation toggle (parity; documented as inert without a render ref).
+	EchoCancellation bool `json:"echoCancellation"`
+	// AdvancedVoiceActivity: the real (RNNoise) VAD gate — the breathing fix.
+	AdvancedVoiceActivity bool `json:"advancedVoiceActivity"`
+	// AutoSensitivity: "Automatically determine input sensitivity".
+	AutoSensitivity bool `json:"autoSensitivity"`
+	// AttenuationAmount: ducking depth [0,1] (Discord's attenuation amount).
+	AttenuationAmount float64 `json:"attenuationAmount"`
+	// AudioSubsystem: "standard" | "legacy" | "experimental" (cosmetic).
+	AudioSubsystem string `json:"audioSubsystem"`
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +272,16 @@ func (a *App) GetState() State {
 			Favorites:  []string{},
 			Volumes:    Volumes{Mic: 1, Master: 1, Monitor: 1},
 			PerClip:    map[string]float64{},
-			Audio:      AudioState{MicMode: config.MicModeVAD, GateSensitivity: 0.15, MonitorSource: config.MonitorSourceClips},
+			Audio: AudioState{
+				MicMode:               config.MicModeVAD,
+				GateSensitivity:       0.15,
+				MonitorSource:         config.MonitorSourceClips,
+				NoiseSuppressionTier:  config.NSModeHigh,
+				AdvancedVoiceActivity: true,
+				AutoSensitivity:       true,
+				AttenuationAmount:     0.5,
+				AudioSubsystem:        config.AudioSubsystemStandard,
+			},
 		}
 	}
 
@@ -295,13 +320,19 @@ func (a *App) GetState() State {
 		Monitor: float64(s.Volumes.MonitorGain()),
 	}
 	audioState := AudioState{
-		MicMode:          s.Processing.MicMode,
-		GateSensitivity:  float64(s.Processing.GateSensitivity),
-		NoiseSuppression: s.Processing.NoiseSuppression,
-		AGC:              s.Processing.AGC,
-		Ducking:          s.Processing.Ducking,
-		ForceThrough:     s.Processing.ForceThrough,
-		MonitorSource:    s.Processing.MonitorSource,
+		MicMode:               s.Processing.MicMode,
+		GateSensitivity:       float64(s.Processing.GateSensitivity),
+		NoiseSuppression:      s.Processing.NoiseSuppression,
+		AGC:                   s.Processing.AGC,
+		Ducking:               s.Processing.Ducking,
+		ForceThrough:          s.Processing.ForceThrough,
+		MonitorSource:         s.Processing.MonitorSource,
+		NoiseSuppressionTier:  s.Processing.NoiseSuppressionTier,
+		EchoCancellation:      s.Processing.EchoCancellation,
+		AdvancedVoiceActivity: s.Processing.AdvancedVAD(),
+		AutoSensitivity:       s.Processing.AutoSens(),
+		AttenuationAmount:     float64(s.Processing.AttenuationAmount),
+		AudioSubsystem:        s.Processing.AudioSubsystem,
 	}
 	theme := s.Theme
 	if theme == "" {
@@ -547,6 +578,143 @@ func (a *App) SetMonitorSource(mode string) {
 		bk.engine.SetMonitorSource(mode)
 	}
 	bk.settings.Processing.MonitorSource = mode
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// ---------------------------------------------------------------------------
+// Audio — Discord Voice & Video parity setters
+// ---------------------------------------------------------------------------
+//
+// Each follows the same push-to-engine-then-persist pattern as the setters above.
+// The engine setters are atomic/RT-safe; the worker reads the new value on its next
+// frame. Settings mutation is serialized by lcMu and persisted via the debounced
+// writer.
+
+// SetNoiseSuppressionTier selects the noise-suppression strength: "none" |
+// "standard" | "high" | "strong" (Discord's None/Standard/Krisp parity). An unknown
+// value is coerced to "high" so the engine and config never store garbage. It also
+// keeps the legacy NoiseSuppression bool in sync (true iff tier != none) so older
+// readers stay consistent.
+func (a *App) SetNoiseSuppressionTier(tier string) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	switch tier {
+	case config.NSModeNone, config.NSModeStandard, config.NSModeHigh, config.NSModeStrong:
+		// valid
+	default:
+		tier = config.NSModeHigh
+	}
+	a.lcMu.Lock()
+	if bk.engine != nil {
+		bk.engine.SetNoiseSuppressionTier(tier)
+	}
+	bk.settings.Processing.NoiseSuppressionTier = tier
+	bk.settings.Processing.NoiseSuppression = tier != config.NSModeNone
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// SetEchoCancellation toggles the APM echo canceller (Discord parity; inert without
+// a far-end render reference, documented in the UI).
+func (a *App) SetEchoCancellation(b bool) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	a.lcMu.Lock()
+	if bk.engine != nil {
+		bk.engine.SetEchoCancellation(b)
+	}
+	bk.settings.Processing.EchoCancellation = b
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// SetAdvancedVoiceActivity toggles the real (RNNoise speech-probability) VAD gate in
+// VAD mode — the breathing fix. Stored as an explicit *bool so a deliberate OFF
+// round-trips (the field defaults ON).
+func (a *App) SetAdvancedVoiceActivity(b bool) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	a.lcMu.Lock()
+	if bk.engine != nil {
+		bk.engine.SetAdvancedVoiceActivity(b)
+	}
+	bk.settings.Processing.AdvancedVoiceActivity = config.BoolPtr(b)
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// SetAutoSensitivity toggles automatic input sensitivity (Discord's "Automatically
+// determine input sensitivity"). Explicit *bool so a deliberate OFF round-trips.
+func (a *App) SetAutoSensitivity(b bool) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	a.lcMu.Lock()
+	if bk.engine != nil {
+		bk.engine.SetAutoSensitivity(b)
+	}
+	bk.settings.Processing.AutoSensitivity = config.BoolPtr(b)
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// SetAttenuationAmount sets the ducking depth in [0,1] (Discord's attenuation
+// amount). The value is clamped engine-side; we persist the clamped value too.
+func (a *App) SetAttenuationAmount(v float64) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	if v < 0 {
+		v = 0
+	} else if v > 1 {
+		v = 1
+	}
+	amt := float32(v)
+	a.lcMu.Lock()
+	if bk.engine != nil {
+		bk.engine.SetAttenuationAmount(amt)
+	}
+	bk.settings.Processing.AttenuationAmount = amt
+	a.lcMu.Unlock()
+	a.persist()
+}
+
+// SetInputVolume sets the live mic-passthrough gain (Discord's "Input Volume"),
+// mapping to the same engine mic gain + persisted mixer level as SetVolume("mic").
+// A separate bound method so the audio panel can expose it independently of the
+// soundboard mixer dock.
+func (a *App) SetInputVolume(value float64) { a.SetVolume("mic", value) }
+
+// SetOutputVolume sets the local monitor gain (Discord's "Output Volume"), mapping
+// to the engine monitor gain + persisted mixer level as SetVolume("monitor").
+func (a *App) SetOutputVolume(value float64) { a.SetVolume("monitor", value) }
+
+// SetAudioSubsystem persists the cosmetic Audio Subsystem selector ("standard" |
+// "legacy" | "experimental"). It has NO engine effect (a single malgo/WASAPI
+// backend); it is stored for Discord parity only. An unknown value coerces to
+// "standard".
+func (a *App) SetAudioSubsystem(sub string) {
+	bk := a.getBackend()
+	if bk == nil {
+		return
+	}
+	switch sub {
+	case config.AudioSubsystemStandard, config.AudioSubsystemLegacy, config.AudioSubsystemExperimental:
+		// valid
+	default:
+		sub = config.AudioSubsystemStandard
+	}
+	a.lcMu.Lock()
+	bk.settings.Processing.AudioSubsystem = sub
 	a.lcMu.Unlock()
 	a.persist()
 }

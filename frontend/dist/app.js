@@ -20,7 +20,10 @@
  * Data model (the binding contract, app.go State): theme, routing{state,detail,
  * canEngage}, categories[{name,count}], clips[{id,name,category,favorite}],
  * favorites[]string, volumes{mic,master,monitor}, perClip{id:float},
- * audio{micMode,gateSensitivity,noiseSuppression,agc,ducking,forceThrough}.
+ * audio{micMode,gateSensitivity,noiseSuppression,noiseSuppressionTier,
+ * echoCancellation,agc,ducking,forceThrough,monitorSource,advancedVoiceActivity,
+ * autoSensitivity,attenuationAmount,audioSubsystem} — the Discord Voice & Video
+ * parity control set.
  *
  * The grid renders state.clips grouped by category. The wired backend's
  * GetState() returns the REAL catalog (the clip library across 12 categories), so the
@@ -75,7 +78,13 @@
     ],
     clips: [], favorites: [],
     volumes: { mic: 1, master: 1, monitor: 1 }, perClip: {},
-    audio: { micMode: "vad", gateSensitivity: 0.15, noiseSuppression: false, agc: false, ducking: false, forceThrough: false, monitorSource: "clips" }
+    audio: {
+      micMode: "vad", gateSensitivity: 0.15, noiseSuppression: false,
+      noiseSuppressionTier: "high", echoCancellation: false, agc: false,
+      ducking: false, forceThrough: false, monitorSource: "clips",
+      advancedVoiceActivity: true, autoSensitivity: true,
+      attenuationAmount: 0.5, audioSubsystem: "standard"
+    }
   };
 
   var S = {
@@ -88,13 +97,21 @@
     cats: [],                 // [{name,count}]
     playing: [],              // [{id,name,chip}] now-playing chips (client-side)
     selected: null,           // selected clipID (per-clip mixer row)
-    vol: { mic: 100, master: 100, monitor: 100 }, // percent (0..150)
+    vol: { mic: 100, master: 100, monitor: 100 }, // percent (0..200 in the audio panel)
     clipGain: 100,
     micMode: "vad",
-    gateSens: 15,             // percent 0..100
+    gateSens: 15,             // percent 0..100 (Input Sensitivity manual threshold)
     gateLevel: 0,             // 0..1 from the gateLevel event
     monSrc: "clips",          // 'clips' | 'transmitted' — what the monitor plays
-    toggles: { noise: false, agc: false, duck: false, force: false },
+    // Discord Voice & Video parity state.
+    nsTier: "high",           // 'none' | 'standard' | 'high' | 'strong'
+    autoSens: true,           // "Automatically determine input sensitivity"
+    attenAmount: 50,          // percent 0..100 (Attenuation amount)
+    subsystem: "standard",    // 'standard' | 'legacy' | 'experimental' (cosmetic)
+    // Processing toggles: advanced voice activity, echo cancellation, AGC, and the
+    // attenuation (duck) on/off. (Noise suppression is the segmented nsTier above;
+    // the old inert "force through" row is retired from the panel.)
+    toggles: { advVad: true, echo: false, agc: false, duck: false },
     demoOpen: false,
     dialog: null              // dialog key or null
   };
@@ -118,9 +135,25 @@
     S.micMode = au.micMode || "vad";
     S.gateSens = Math.round((au.gateSensitivity != null ? au.gateSensitivity : 0.15) * 100);
     S.monSrc = au.monitorSource === "transmitted" ? "transmitted" : "clips";
+
+    // Noise-suppression tier (segmented). Prefer the explicit tier; fall back to the
+    // legacy bool (true -> standard, false -> high default) for a degraded snapshot.
+    var TIERS = { none: 1, standard: 1, high: 1, strong: 1 };
+    S.nsTier = TIERS[au.noiseSuppressionTier] ? au.noiseSuppressionTier
+      : (au.noiseSuppression ? "standard" : "high");
+
+    // Advanced VAD + auto-sensitivity default ON (the breathing fix): treat only an
+    // explicit false as off so an unset/degraded snapshot keeps the safe default.
+    S.autoSens = au.autoSensitivity !== false;
+    S.attenAmount = Math.round((au.attenuationAmount != null ? au.attenuationAmount : 0.5) * 100);
+    var SUBS = { standard: 1, legacy: 1, experimental: 1 };
+    S.subsystem = SUBS[au.audioSubsystem] ? au.audioSubsystem : "standard";
+
     S.toggles = {
-      noise: !!au.noiseSuppression, agc: !!au.agc,
-      duck: !!au.ducking, force: !!au.forceThrough
+      advVad: au.advancedVoiceActivity !== false,
+      echo: !!au.echoCancellation,
+      agc: !!au.agc,
+      duck: !!au.ducking
     };
 
     // Clips: prefer the real catalog (the normal wired path); only synthesize
@@ -613,18 +646,70 @@
     show($("ptt-block"), S.micMode === "ptt");
   }
 
-  function renderGate() {
+  // INPUT SENSITIVITY — Discord's "Input Sensitivity": an Automatic toggle plus a
+  // manual threshold slider. When Automatic is on, the manual slider is dimmed and
+  // the threshold tracks the noise floor (engine-side); when off, the slider sets it.
+  // The slider value is reused as the VAD open-probability bias when Advanced Voice
+  // Activity is on, and as the energy threshold otherwise.
+  function renderInputSensitivity() {
+    // Automatic toggle.
+    var at = $("autosens-toggle");
+    if (at) {
+      at.classList.toggle("on", S.autoSens);
+      at.setAttribute("aria-checked", S.autoSens ? "true" : "false");
+      var box = at.querySelector(".box");
+      if (box) box.textContent = S.autoSens ? "✓" : "";
+    }
+    // Manual threshold slider (dimmed + disabled while Automatic is on).
     var g = $("gate");
-    g.value = S.gateSens;
-    g.style.background = trackFill(S.gateSens, 100);
-    $("gate-val").textContent = S.gateSens + "%";
+    if (g) {
+      g.value = S.gateSens;
+      g.disabled = S.autoSens;
+      g.style.background = S.autoSens ? "var(--elev)" : trackFill(S.gateSens, 100);
+    }
+    var gv = $("gate-val");
+    if (gv) {
+      gv.textContent = S.autoSens ? "Auto" : S.gateSens + "%";
+      gv.classList.toggle("off", S.autoSens);
+    }
   }
 
+  // NOISE SUPPRESSION — segmented None / Standard / High / Strong (one tier at a
+  // time; never stacked). Mirrors Discord's None / Standard / Krisp selector mapped
+  // onto our engine: Standard/High = the WebRTC APM noise suppressor at two
+  // strengths, Strong = RNNoise (our closest non-proprietary, Krisp-like option).
+  var NSTIER_CAP = {
+    none: "No noise suppression. Discord hears your raw mic — background noise and breathing included.",
+    standard: "WebRTC noise suppression at a moderate level — Discord’s “Standard”. Trims steady background noise while staying transparent.",
+    high: "WebRTC noise suppression at a high level (the default). Aggressive enough to shave breathing that rides under your voice.",
+    strong: "RNNoise — our closest non-proprietary, Krisp-like denoiser. The most aggressive removal of breathing, keyboard and fan noise; the APM suppressor is bypassed so the two never stack."
+  };
+  function renderNSTier() {
+    var seg = $("nstier-seg");
+    if (!seg) return;
+    var btns = seg.querySelectorAll(".seg-btn");
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].getAttribute("data-tier") === S.nsTier;
+      btns[i].classList.toggle("on", on);
+      btns[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    var cap = $("nstier-cap");
+    if (cap) cap.textContent = NSTIER_CAP[S.nsTier] || NSTIER_CAP.high;
+  }
+  function setNSTier(tier) {
+    if (!NSTIER_CAP[tier] || tier === S.nsTier) return;
+    S.nsTier = tier;
+    call("SetNoiseSuppressionTier", tier);
+    renderNSTier();
+  }
+
+  // Processing toggles: Advanced voice activity (the breathing-fix VAD), Echo
+  // cancellation, Automatic gain control. (Noise suppression is the segmented tier
+  // above; Attenuation has its own card; the inert "Force through" row is retired.)
   var TOGGLE_META = [
-    ["noise", "Noise suppression", "RNNoise — removes background hiss & hum", "SetNoiseSuppression"],
-    ["agc", "Automatic gain control", "Evens out your volume automatically", "SetAGC"],
-    ["duck", "Duck soundboard while talking", "Lowers clips when you speak", "SetDucking"],
-    ["force", "Force through voice gate", "Inaudible tone keeps Discord’s gate open. Does not defeat Krisp.", "SetForceThrough"]
+    ["advVad", "Advanced voice activity", "Opens the gate on real speech, not just loud sound — keeps your breathing OFF the call. Discord’s Krisp analog. Recommended ON.", "SetAdvancedVoiceActivity"],
+    ["echo", "Echo cancellation", "Cancels speaker bleed picked up by your mic.", "SetEchoCancellation"],
+    ["agc", "Automatic gain control", "Evens out your volume automatically.", "SetAGC"]
   ];
 
   function renderToggles() {
@@ -644,6 +729,54 @@
       });
       host.appendChild(row);
     });
+  }
+
+  // ATTENUATION — Discord's "lower other sounds while talking": a toggle (Ducking)
+  // plus an amount slider (the duck depth). The amount block dims when off.
+  function renderAttenuation() {
+    var t = $("atten-toggle");
+    if (t) {
+      t.classList.toggle("on", S.toggles.duck);
+      t.setAttribute("aria-checked", S.toggles.duck ? "true" : "false");
+      var box = t.querySelector(".box");
+      if (box) box.textContent = S.toggles.duck ? "✓" : "";
+    }
+    var block = $("atten-amount-block");
+    if (block) block.classList.toggle("disabled", !S.toggles.duck);
+    var a = $("atten-amount");
+    if (a) {
+      a.value = S.attenAmount;
+      a.disabled = !S.toggles.duck;
+      a.style.background = S.toggles.duck ? trackFill(S.attenAmount, 100) : "var(--elev)";
+    }
+    var av = $("atten-val");
+    if (av) av.textContent = S.attenAmount + "%";
+  }
+
+  // INPUT / OUTPUT VOLUME — Discord parity sliders (0–200%). Input drives the mic
+  // gain into Discord (the same channel as the mixer "Mic" slider); output drives
+  // the local monitor gain (what YOU hear). They share S.vol so the mixer dock and
+  // this panel stay in sync.
+  function renderAudioVolumes() {
+    var pairs = [
+      ["vol-input", "vol-input-val", "mic", "SetInputVolume"],
+      ["vol-output", "vol-output-val", "monitor", "SetOutputVolume"]
+    ];
+    pairs.forEach(function (p) {
+      var slider = $(p[0]);
+      if (!slider) return;
+      var val = S.vol[p[2]];
+      slider.value = val;
+      slider.style.background = trackFill(val, 200);
+      var lab = $(p[1]);
+      if (lab) { lab.textContent = val + "%"; lab.classList.toggle("hot", val > 100); }
+    });
+  }
+
+  // AUDIO SUBSYSTEM — cosmetic Standard/Legacy/Experimental dropdown (parity).
+  function renderSubsystem() {
+    var sel = $("subsystem-select");
+    if (sel) sel.value = S.subsystem;
   }
 
   var CHECKLIST = [
@@ -682,6 +815,14 @@
     var fill = $("meter-fill");
     fill.style.width = Math.round(lvl * 100) + "%";
     fill.classList.toggle("open", open);
+
+    // The Input-sensitivity card carries a second live meter so the user can set the
+    // threshold against the live signal (Discord shows the same bar under the slider).
+    var sfill = $("sens-fill");
+    if (sfill) {
+      sfill.style.width = Math.round(lvl * 100) + "%";
+      sfill.classList.toggle("open", open);
+    }
   }
 
   // ===========================================================================
@@ -809,8 +950,12 @@
     renderMixer();
     renderMonSource();
     renderModes();
-    renderGate();
+    renderInputSensitivity();
+    renderNSTier();
     renderToggles();
+    renderAttenuation();
+    renderAudioVolumes();
+    renderSubsystem();
     renderChecklist();
     renderMeter();
     renderDialog();
@@ -877,14 +1022,91 @@
       });
     }
 
-    // Gate slider.
+    // Input-sensitivity manual threshold slider (the gate). Ignored while Automatic
+    // is on (the slider is disabled, but guard anyway). Reused as the VAD open-prob
+    // bias when Advanced Voice Activity is on.
     var gate = $("gate");
     gate.addEventListener("input", function () {
+      if (S.autoSens) return;
       S.gateSens = +gate.value;
       gate.style.background = trackFill(S.gateSens, 100);
       $("gate-val").textContent = S.gateSens + "%";
       call("SetGateSensitivity", S.gateSens / 100);
     });
+
+    // Automatically determine input sensitivity (Discord parity) toggle.
+    var autoSens = $("autosens-toggle");
+    if (autoSens) {
+      autoSens.addEventListener("click", function () {
+        S.autoSens = !S.autoSens;
+        call("SetAutoSensitivity", S.autoSens);
+        renderInputSensitivity();
+      });
+    }
+
+    // Noise-suppression segmented selector (None / Standard / High / Strong).
+    var nsSeg = $("nstier-seg");
+    if (nsSeg) {
+      nsSeg.addEventListener("click", function (e) {
+        var btn = e.target.closest ? e.target.closest(".seg-btn") : null;
+        if (btn) setNSTier(btn.getAttribute("data-tier"));
+      });
+    }
+
+    // Attenuation toggle (Ducking on/off).
+    var attenToggle = $("atten-toggle");
+    if (attenToggle) {
+      attenToggle.addEventListener("click", function () {
+        S.toggles.duck = !S.toggles.duck;
+        call("SetDucking", S.toggles.duck);
+        renderAttenuation();
+      });
+    }
+
+    // Attenuation amount slider (duck depth).
+    var atten = $("atten-amount");
+    if (atten) {
+      atten.addEventListener("input", function () {
+        if (!S.toggles.duck) return;
+        S.attenAmount = +atten.value;
+        atten.style.background = trackFill(S.attenAmount, 100);
+        $("atten-val").textContent = S.attenAmount + "%";
+        call("SetAttenuationAmount", S.attenAmount / 100);
+      });
+    }
+
+    // Input / Output volume sliders (0–200%).
+    var volInput = $("vol-input");
+    if (volInput) {
+      volInput.addEventListener("input", function () {
+        var v = +volInput.value;
+        S.vol.mic = v;
+        volInput.style.background = trackFill(v, 200);
+        var lab = $("vol-input-val");
+        lab.textContent = v + "%"; lab.classList.toggle("hot", v > 100);
+        call("SetInputVolume", v / 100);
+      });
+    }
+    var volOutput = $("vol-output");
+    if (volOutput) {
+      volOutput.addEventListener("input", function () {
+        var v = +volOutput.value;
+        S.vol.monitor = v;
+        volOutput.style.background = trackFill(v, 200);
+        var lab = $("vol-output-val");
+        lab.textContent = v + "%"; lab.classList.toggle("hot", v > 100);
+        call("SetOutputVolume", v / 100);
+      });
+    }
+
+    // Audio subsystem dropdown (cosmetic parity).
+    var subsystem = $("subsystem-select");
+    if (subsystem) {
+      subsystem.addEventListener("change", function () {
+        S.subsystem = subsystem.value;
+        call("SetAudioSubsystem", S.subsystem);
+      });
+    }
   }
 
   // ===========================================================================

@@ -223,7 +223,10 @@ func (e *Engine) duckedMaster() float32 {
 		coef = attack
 	}
 	e.duckEnv += coef * (target - e.duckEnv)
-	// duckDepth is the maximum attenuation at a fully-open gate (~-9 dB == 0.35).
-	const duckDepth float32 = 0.65
+	// duckDepth is the maximum attenuation at a fully-open gate, now the user-exposed
+	// Attenuation amount (Discord parity) read once here via a single atomic load.
+	// Default 0.65 (~-9 dB) preserves the historical hardcoded behaviour. One atomic
+	// load; still allocation- and lock-free on the RT thread.
+	duckDepth := e.attenuationAmount()
 	return master * (1 - duckDepth*e.duckEnv)
 }
