@@ -238,11 +238,26 @@ func (b *Backend) close() {
 func initLogging() (closeLog func()) {
 	if logPath, err := config.LogPath(); err == nil {
 		if f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
-			log.SetOutput(io.MultiWriter(os.Stderr, f))
+			// NOTE: io.MultiWriter aborts on the FIRST writer that errors, so in the
+			// shipping -H=windowsgui build (no console => os.Stderr is an invalid
+			// handle) a failing stderr write silently suppressed the log FILE too.
+			// bestEffortWriter isolates each writer so the file always gets written.
+			log.SetOutput(bestEffortWriter{os.Stderr, f})
 			return func() { _ = f.Close() }
 		}
 	}
 	return func() {}
+}
+
+// bestEffortWriter writes to every underlying writer and never reports an error,
+// so one dead sink (stderr with no console) cannot suppress the others.
+type bestEffortWriter []io.Writer
+
+func (w bestEffortWriter) Write(p []byte) (int, error) {
+	for _, dst := range w {
+		_, _ = dst.Write(p)
+	}
+	return len(p), nil
 }
 
 // ---------------------------------------------------------------------------
