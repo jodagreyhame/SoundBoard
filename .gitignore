@@ -1,76 +1,34 @@
-# ---------------------------------------------------------------------------
 # Build output
-# ---------------------------------------------------------------------------
-# The ONLY build output this project produces is build/bin/soundboard.exe.
-# Keeping one output location matters: a stale binary somewhere else is
-# indistinguishable from a fresh one, and running the wrong copy is a confusing
-# failure to diagnose.
 build/bin/
 *.exe
 *.exe~
+*.syso
 /dist/
 
-# Wails writes a Windows resource object into the project root during `wails
-# build` and removes it on success — an interrupted or failed build leaves it
-# behind, where it is otherwise committable.
-*.syso
-
-# build/ also holds PACKAGING INPUTS (appicon.png, windows/icon.ico, the
-# manifest) which ARE source and must stay tracked. Only build/bin/ above is
-# output, so do not broaden this to build/.
-
-# ---------------------------------------------------------------------------
-# Generated code
-# ---------------------------------------------------------------------------
-# Wails regenerates the JS bindings and runtime on every build. Nothing in the
-# shipped code references them (the binary embeds frontend/dist), and they are a
-# verbatim copy of upstream Wails rather than this project's source — so
-# committing them would create an attribution obligation for no benefit.
+# Generated
 frontend/wailsjs/
-
-# The vanilla frontend under frontend/dist IS source — hand-written HTML/CSS/JS
-# with no build step. Never ignore it.
 !frontend/dist/
 !frontend/dist/**
 
-# ---------------------------------------------------------------------------
 # Go
-# ---------------------------------------------------------------------------
 vendor/
 *.test
 *.out
 *.prof
 coverage.*
 
-# ---------------------------------------------------------------------------
-# The clip library
-# ---------------------------------------------------------------------------
-# User-supplied and never committed. No audio ships with this project, and PRs
-# adding audio are declined (see CONTRIBUTING.md).
-#
-# The leading slash is load-bearing: a bare `sounds/` matches at ANY depth and
-# would silently untrack internal/catalog/testdata/sounds/, which the catalog
-# tests depend on. Root-anchored, it matches only the library.
+# Clip library (user-supplied)
 /sounds/
-
-# Scratch from importing or fetching clips.
 *.part
 .raw_*
 
-# ---------------------------------------------------------------------------
-# Local development
-# ---------------------------------------------------------------------------
-# Transient verification screenshots use the _name.png convention.
+# Local
 _*.png
-
-# Editors / IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
 desktop.ini
