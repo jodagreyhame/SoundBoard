@@ -106,6 +106,13 @@ func main() {
 		// Close-to-tray: prevent the real close, hide the window instead. The tray
 		// (or the in-window Quit) is the only path that truly exits.
 		OnBeforeClose: func(ctx context.Context) (prevent bool) {
+			// Wails calls this from inside Frontend.Quit() as well as on a real
+			// close, and abandons the exit if we veto. So ask the App whether a
+			// quit is already under way: if it is, let the close through or the
+			// process can never exit.
+			if !app.ShouldPreventClose() {
+				return false
+			}
 			wailsruntime.WindowHide(ctx)
 			return true
 		},

@@ -190,3 +190,48 @@ func TestGetStateNilBackend(t *testing.T) {
 		t.Errorf("routing.state = %q, want absent", st.Routing.State)
 	}
 }
+
+// TestCloseIsVetoedUntilQuitRequested pins the tray-app close/quit contract.
+//
+// Regression guard. OnBeforeClose used to return prevent=true unconditionally so
+// that closing the window hid it to the tray. But wails' Frontend.Quit()
+// (internal/frontend/desktop/windows/frontend.go) is:
+//
+//	func (f *Frontend) Quit() {
+//	    if f.frontendOptions.OnBeforeClose != nil && f.frontendOptions.OnBeforeClose(f.ctx) {
+//	        return
+//	    }
+//	    f.mainWindow.Invoke(winc.Exit)
+//	}
+//
+// An unconditional veto therefore made runtime.Quit a no-op, and NO exit path
+// worked — tray Quit, the in-window Quit button, the taskbar's Close, and the
+// window's X all just re-hid the window. The process could only be killed.
+//
+// The contract: veto a close until a real quit has been requested, then stop.
+func TestCloseIsVetoedUntilQuitRequested(t *testing.T) {
+	app := NewApp()
+
+	if !app.ShouldPreventClose() {
+		t.Fatal("a plain window close must be vetoed so the app hides to the tray")
+	}
+
+	// No Wails context in a unit test, so Quit takes the cleanup path. That is
+	// fine: what matters is that it records the intent to exit.
+	app.Quit()
+
+	if app.ShouldPreventClose() {
+		t.Fatal("after Quit() the close must not be vetoed, or wails' Frontend.Quit returns early and the process never exits")
+	}
+}
+
+// A second Quit must stay decided — quitOnce guards the exit path, and the flag
+// must not be reset by a duplicate tray/in-window Quit arriving together.
+func TestQuitIsIdempotent(t *testing.T) {
+	app := NewApp()
+	app.Quit()
+	app.Quit()
+	if app.ShouldPreventClose() {
+		t.Fatal("close veto must remain lifted after a repeated Quit")
+	}
+}
