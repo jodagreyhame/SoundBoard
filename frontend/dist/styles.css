@@ -537,6 +537,21 @@ html, body {
 .dialog .d-btn.secondary { background: var(--elev2); color: var(--fg); }
 
 /* ---------------------------------------------------------------------------
+ * First-run consent gate. Sits ABOVE the progress/outcome dialog (z-index 60 vs
+ * 50) and covers the whole shell, so nothing behind it can be clicked while the
+ * user decides. Wider than the standard dialog because it has real prose to
+ * read rather than a one-line status.
+ * ------------------------------------------------------------------------- */
+.consent-overlay { z-index: 60; background: rgba(0, 0, 0, .78); }
+.dialog.consent { width: 520px; max-height: calc(100% - 60px); overflow-y: auto; }
+.dialog.consent .d-body p { margin: 0 0 12px; }
+.dialog.consent .consent-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 9px; }
+.dialog.consent .consent-list li { padding-left: 2px; }
+.dialog.consent .d-body b { color: var(--fg); font-weight: 700; }
+.consent-link { color: var(--primary); font-weight: 700; text-decoration: none; cursor: pointer; }
+.consent-link:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------------------
  * Narrow-window reflow. The comp targets 1160x760; below that the mixer/audio
  * grids collapse to a single column and the sidebar narrows so the soundboard
  * stays usable when the user resizes the frameless window down.

@@ -322,6 +322,21 @@
                 <div id="check-grid" class="check-grid"></div>
               </div>
 
+              <!-- PERSISTENT ATTRIBUTION. The audio routing this whole view
+                   configures only exists because of a third-party driver, so the
+                   credit lives here permanently — not just in the first-run
+                   consent modal, which a user who already had VB-CABLE installed
+                   would never see. THIRD_PARTY_NOTICES.md covers the legal side;
+                   this is so the user can SEE what their mic path depends on. -->
+              <div class="card full">
+                <div class="card-title" style="margin-bottom:4px;">Audio routing dependency</div>
+                <div class="proc-sub" style="margin-bottom:0;">Your microphone path runs through <b>VB-CABLE</b>, a virtual audio device by
+                  <b>VB-Audio Software</b> — third-party donationware, not part of SoundBoard.
+                  If you find it useful, please donate to its authors:
+                  <a class="consent-link" href="https://vb-audio.com/Cable/" data-external="https://vb-audio.com/Cable/">vb-audio.com/Cable/</a>
+                </div>
+              </div>
+
             </div>
           </div>
 
@@ -335,6 +350,51 @@
           <div id="dialog-title" class="d-title"></div>
           <div id="dialog-body" class="d-body"></div>
           <div id="dialog-btns" class="d-btns"></div>
+        </div>
+      </div>
+
+      <!-- ==================== FIRST-RUN CONSENT GATE ====================
+           Shown at startup when VB-CABLE is NOT present, BEFORE the app can be
+           used. SoundBoard cannot route anything into your microphone without
+           it, so the only two answers are "install it" and "quit".
+
+           Everything the user is agreeing to is stated here rather than left to
+           an unexplained UAC prompt: WHAT is installed, WHO wrote it, WHERE it
+           is fetched from, that it needs administrator rights, that VB-Audio
+           asks for a donation, and that Windows may need a full restart before
+           the virtual device shows up. Deliberately has no "don't ask again":
+           until the cable exists the app genuinely cannot work, so re-asking on
+           every launch is the honest behaviour. -->
+      <div id="consent-overlay" class="dialog-overlay consent-overlay hidden">
+        <div class="dialog consent">
+          <div class="d-title">SoundBoard needs VB-CABLE to run</div>
+          <div class="d-body">
+            <p>SoundBoard plays clips into your microphone by routing them through a
+            virtual audio device called <b>VB-CABLE</b>. It is a <b>required dependency</b>,
+            not an optional extra — without it there is no path from the soundboard to
+            your voice chat, and the app has nothing to do.</p>
+            <ul class="consent-list">
+              <li><b>VB-CABLE is third-party software by VB-Audio Software.</b> It is not
+              part of this project, is not bundled with it, and is not written or
+              maintained by SoundBoard&rsquo;s authors.</li>
+              <li>Choosing to continue <b>downloads it from
+              <span class="mono">download.vb-audio.com</span> over HTTPS</b> and runs
+              VB-Audio&rsquo;s own installer. Installing an audio driver needs
+              <b>Windows administrator approval</b>, so Windows will show a UAC prompt
+              that you have to approve.</li>
+              <li><b>VB-CABLE is donationware.</b> It is free to use, and VB-Audio asks
+              for a donation if you find it useful. Please support them:
+              <a id="consent-link" class="consent-link" href="https://vb-audio.com/Cable/"
+                 data-external="https://vb-audio.com/Cable/">vb-audio.com/Cable/</a></li>
+              <li>Installing a virtual audio device <b>may require a full Windows
+              restart</b> before the new device appears. If it does not show up
+              afterwards, restart Windows and launch SoundBoard again.</li>
+            </ul>
+          </div>
+          <div class="d-btns">
+            <button id="consent-quit" class="ibtn d-btn secondary" type="button">Quit SoundBoard</button>
+            <button id="consent-proceed" class="ibtn d-btn primary" type="button">Download and install VB-CABLE</button>
+          </div>
         </div>
       </div>
 

@@ -789,13 +789,17 @@ func (a *App) InstallRouting() {
 	}
 	go func() {
 		if b.setup.CanEngage() && !b.setup.Engaged() {
-			a.emitInstallProgress("Engaging routing — pointing Discord at the soundboard…", false, "")
+			// These messages describe only what THIS process did to the Windows
+			// default recording device. They must never claim anything about
+			// Discord: its input-device selection and noise-suppression settings
+			// are not readable from here.
+			a.emitInstallProgress("Engaging routing — pointing your default mic at CABLE Output…", false, "")
 			if err := b.setup.Engage(); err != nil {
 				a.emitInstallProgress("Could not engage routing.", true, err.Error())
 				a.emitRoutingStatus(b.setup.snapshot())
 				return
 			}
-			a.emitInstallProgress("Routing engaged — Discord now hears the soundboard.", true, "")
+			a.emitInstallProgress("Routing engaged — your default mic now points at CABLE Output.", true, "")
 			a.emitRoutingStatus(b.setup.snapshot())
 			return
 		}
@@ -809,7 +813,7 @@ func (a *App) InstallRouting() {
 			a.emitRoutingStatus(b.setup.snapshot())
 			return
 		}
-		a.emitInstallProgress("VB-CABLE installed. A reboot may be required, then relaunch SoundBoard to engage routing.", true, "")
+		a.emitInstallProgress("VB-CABLE installed. Windows usually needs a full restart before the new device appears — restart Windows, then launch SoundBoard again to engage routing.", true, "")
 		a.emitRoutingStatus(b.setup.snapshot())
 	}()
 }

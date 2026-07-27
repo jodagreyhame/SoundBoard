@@ -68,7 +68,7 @@
   // --- live UI state (not all of it is persisted server-side) --------------
   var FALLBACK = {
     theme: "dark",
-    routing: { state: "absent", detail: "VB-CABLE not detected — install it to route audio into Discord.", canEngage: false },
+    routing: { state: "absent", detail: "VB-CABLE not detected — install it to route the soundboard into your mic.", canEngage: false },
     categories: [],
     clips: [], favorites: [],
     volumes: { mic: 1, master: 1, monitor: 1 }, perClip: {},
@@ -281,7 +281,7 @@
       var present = r.state === "present";
       var text = r.detail || (present
         ? "VB-CABLE found — engage routing to point your default mic at it."
-        : "VB-CABLE not detected — install it to route audio into Discord.");
+        : "VB-CABLE not detected — install it to route the soundboard into your mic.");
       var label = present ? "Engage routing" : "Install / Fix audio routing";
       b.innerHTML =
         '<span class="b-warn">⚠</span>' +
@@ -990,16 +990,30 @@
       body = "Routing the soundboard into your microphone path…";
       btns = [];
     } else if (d === "error") {
+      // A missing CABLE Output after an install is almost never a broken
+      // install — it is Windows not having enumerated the new virtual device
+      // yet. Reinstalling cannot fix that, so do not send the user round a loop
+      // that can never work: name the restart.
       err = true; title = "Install failed";
-      body = "Could not locate the CABLE Output device. Try reinstalling VB-CABLE, then retry.";
+      body = "Could not locate the CABLE Output device. A newly installed virtual audio device " +
+        "usually only appears after a full Windows restart. Restart Windows, then launch " +
+        "SoundBoard again. Reinstalling VB-CABLE will not make the device appear any sooner.";
       btns = [{ label: "OK", kind: "primary", on: closeDialog }];
     } else if (d === "engageSuccess") {
+      // States only what this process did. It does NOT claim anyone can hear the
+      // soundboard: that depends on Discord's own input-device selection, which
+      // this app cannot read.
       title = "Routing engaged";
-      body = "The soundboard is now mixed into your microphone — others in your call can hear it.";
+      body = "Your Windows default recording device now points at CABLE Output, and the " +
+        "soundboard is mixed into it. Point Discord at that same device and apply the " +
+        "settings listed under Mic & Audio — SoundBoard cannot check them for you.";
       btns = [{ label: "Nice", kind: "primary", on: closeDialog }];
     } else if (d === "installSuccess") {
       title = "VB-CABLE installed";
-      body = "Installation complete. SoundBoard needs to restart to finish wiring the audio routing.";
+      body = "Installation complete. Windows usually needs a FULL RESTART before the new " +
+        "CABLE Output device appears — restart Windows when convenient, then launch " +
+        "SoundBoard again. If the device is already there, restarting just SoundBoard is " +
+        "enough to pick it up.";
       btns = [
         { label: "Later", kind: "secondary", on: closeDialog },
         { label: "Restart app", kind: "primary", on: restartApp }
@@ -1019,6 +1033,68 @@
       btn.type = "button";
       btn.addEventListener("click", b.on);
       host.appendChild(btn);
+    });
+  }
+
+  // ===========================================================================
+  // FIRST-RUN CONSENT GATE (VB-CABLE)
+  // ===========================================================================
+  // SoundBoard cannot route anything into the microphone without VB-CABLE, so
+  // when the cable is absent at startup this modal blocks the app until the user
+  // either agrees to install it or quits. The markup (index.html
+  // #consent-overlay) states what is installed, who wrote it, where it is
+  // fetched from, that it needs administrator rights, that it is donationware,
+  // and that Windows may need a full restart — none of which the bare UAC prompt
+  // says.
+  //
+  // Deliberately absent: any "don't ask again". The app is non-functional
+  // without the cable, so a user who quits and relaunches with it still missing
+  // sees this again. Deliberately NOT shown when the cable IS present.
+
+  function consentNeeded() {
+    // "absent" means neither VB-CABLE endpoint was found (backend.go
+    // routingController.snapshot). A partial install reports "present" and is
+    // handled by the banner instead, so this never fires on a working setup.
+    return ((S.snap.routing || {}).state === "absent");
+  }
+
+  function showConsent() {
+    var ov = $("consent-overlay");
+    if (ov) show(ov, true);
+  }
+
+  function hideConsent() {
+    var ov = $("consent-overlay");
+    if (ov) show(ov, false);
+  }
+
+  // PROCEED — dismiss the gate and enter the EXISTING install path (the same one
+  // the banner's "Install / Fix audio routing" button uses), so there is one
+  // install flow, not two.
+  function consentProceed() {
+    hideConsent();
+    onInstallRouting();
+  }
+
+  // QUIT — the bound App.Quit, which is the app's single exit choke point (it
+  // unwinds the Wails runtime, which runs the backend teardown: engine stop,
+  // default-mic restore, settings save). No second exit path is invented here.
+  function consentQuit() {
+    call("Quit");
+  }
+
+  // External links must open in the user's real browser, never inside the
+  // webview — the webview is the app, and navigating it away would strand the
+  // user with no way back. Any anchor carrying data-external routes through the
+  // Wails runtime's BrowserOpenURL.
+  function wireExternalLinks() {
+    document.addEventListener("click", function (e) {
+      var a = e.target && e.target.closest ? e.target.closest("a[data-external]") : null;
+      if (!a) return;
+      e.preventDefault();
+      var url = a.getAttribute("data-external");
+      var r = rt();
+      if (r && r.BrowserOpenURL && url) r.BrowserOpenURL(url);
     });
   }
 
@@ -1045,10 +1121,18 @@
 
     var dhost = $("demo-dialogs");
     dhost.innerHTML = "";
-    [["progressInstall", "Install progress"], ["error", "Error"],
+    // "First-run consent" is the real gate, not a mock: it opens the same
+    // #consent-overlay boot shows when VB-CABLE is missing, so the flow can be
+    // inspected on a machine that already has the cable installed.
+    [["consent", "First-run consent"],
+     ["progressInstall", "Install progress"], ["error", "Error"],
      ["engageSuccess", "Engage success"], ["installSuccess", "Install success"]].forEach(function (pair) {
       var row = el("div", "row", esc(pair[1]));
-      row.addEventListener("click", function () { S.demoOpen = false; renderDemoPop(); openDialog(pair[0]); });
+      row.addEventListener("click", function () {
+        S.demoOpen = false;
+        renderDemoPop();
+        if (pair[0] === "consent") showConsent(); else openDialog(pair[0]);
+      });
       dhost.appendChild(row);
     });
   }
@@ -1241,6 +1325,13 @@
       });
     }
 
+    // First-run consent gate: proceed into the install flow, or quit.
+    var cProceed = $("consent-proceed");
+    if (cProceed) cProceed.addEventListener("click", consentProceed);
+    var cQuit = $("consent-quit");
+    if (cQuit) cQuit.addEventListener("click", consentQuit);
+    wireExternalLinks();
+
     // Audio subsystem dropdown (cosmetic parity).
     var subsystem = $("subsystem-select");
     if (subsystem) {
@@ -1320,16 +1411,25 @@
   // ===========================================================================
   // BOOT
   // ===========================================================================
+  // finishBoot renders the hydrated snapshot and then, if VB-CABLE is missing,
+  // raises the first-run consent gate over it. The gate is decided from the
+  // BOOT snapshot only: a routingStatus event arriving later must not spring a
+  // blocking modal on someone mid-session.
+  function finishBoot() {
+    renderAll();
+    if (consentNeeded()) showConsent();
+  }
+
   function boot() {
     wire();
     subscribeEvents();
     var p = call("GetState");
     if (p && p.then) {
-      p.then(function (snap) { ingest(snap); renderAll(); })
-       .catch(function () { ingest(FALLBACK); renderAll(); });
+      p.then(function (snap) { ingest(snap); finishBoot(); })
+       .catch(function () { ingest(FALLBACK); finishBoot(); });
     } else {
       ingest(FALLBACK);
-      renderAll();
+      finishBoot();
     }
   }
 

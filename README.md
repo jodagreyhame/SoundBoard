@@ -375,12 +375,27 @@ Settings (volumes, window size, mic/cable/monitor names, hotkeys) persist to
 
 ### The easy path: let the app do it
 
-If VB-CABLE is **not** installed, the setup banner shows **Install / Fix audio routing**.
-Clicking it downloads the official VB-CABLE driver pack (from VB-Audio's own CDN, HTTPS-pinned)
-and runs its **silent installer elevated** (you approve one Windows UAC prompt). **VB-CABLE
-requires a full Windows reboot** before its endpoints appear — the app tells you so. After the
-reboot, relaunch SoundBoard and it **auto-engages routing**: Discord hears the soundboard
-with **zero changes inside Discord**, and your real mic is restored when you quit.
+If VB-CABLE is **not** installed, SoundBoard cannot do anything at all, so on startup it shows
+a **blocking first-run consent screen** before the rest of the UI is usable. That screen states
+what is about to happen: VB-CABLE is **third-party software by VB-Audio Software**, it is *not*
+bundled with SoundBoard, it is **downloaded from `download.vb-audio.com` over HTTPS** and
+installed with **Windows administrator approval** (a UAC prompt), it is **donationware**
+(<https://vb-audio.com/Cable/> — please donate if you find it useful), and a **full Windows
+restart may be required** before the virtual device appears. Your two options are **Download and
+install VB-CABLE** and **Quit SoundBoard**; there is no "don't ask again", because until the
+cable exists the app has no audio path. The same install runs from the setup banner's
+**Install / Fix audio routing** button.
+
+The installer runs elevated and silently. It also tries a PnP rescan and an Audio Endpoint
+Builder service bounce to surface the new endpoints without a restart, but that does not always
+work — **if `CABLE Output` does not show up, restart Windows** and launch SoundBoard again.
+Reinstalling will not make it appear sooner.
+
+Once the cable exists, SoundBoard **auto-engages routing** at launch (your Windows default
+recording device is pointed at `CABLE Output`) and restores your real mic when you quit. That is
+a *Windows* default; **Discord keeps its own input-device selection**, so you still have to point
+Discord at `CABLE Output` and apply the settings in the **Mic & Audio** checklist. SoundBoard
+cannot read Discord's settings and never claims to have verified them.
 
 ### What auto-route does (and undoes)
 
