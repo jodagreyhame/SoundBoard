@@ -452,6 +452,52 @@ working directory), so **keep the exe and the `sounds/` folder together**.
 1. Drop audio files into `sounds/<category>/` (create a new directory for a new category).
 2. **Relaunch the app.** The new clips appear in the grid — no rebuild required.
 
+Dropped files play as-is, which means a clip mastered louder than the rest will be jarringly
+loud on the board. Two optional helpers handle that. Both need `ffmpeg` on `PATH`, and both
+normalise to **−16 LUFS, 48 kHz stereo** — the format the engine mixes at, so no resampling
+happens on first play.
+
+`sounds/` is gitignored: your library is yours and is never committed.
+
+#### `scripts/import_sounds.sh` — normalise audio you already have
+
+Contacts no website and downloads nothing. Point it at files or a folder:
+
+```bash
+scripts/import_sounds.sh memes ~/clips/airhorn.mp3
+scripts/import_sounds.sh games ~/clips/game-sfx/      # a whole folder
+scripts/import_sounds.sh --dry-run memes ~/clips/     # show, write nothing
+```
+
+It levels each clip, converts to `.wav`, and renames to snake_case
+(`Air Horn (loud).mp3` → `air_horn_loud.wav`). Existing clips are skipped unless `--force`.
+
+#### `scripts/fetch_freesound.sh` — fetch Creative-Commons audio
+
+[Freesound](https://freesound.org) is a database of CC-licensed audio with a documented public
+API. This uses that API as intended — your own key, no browser impersonation — and records
+every clip's licence and author.
+
+```bash
+export FREESOUND_API_KEY=...        # free key: https://freesound.org/apiv2/apply/
+scripts/fetch_freesound.sh reactions "applause"
+scripts/fetch_freesound.sh games "8-bit coin" -n 5 --license cc0
+```
+
+Each fetched clip is appended to `sounds/<category>/ATTRIBUTION.md` with its Freesound ID,
+author, licence and URL. **CC-BY audio requires you to credit the author if you redistribute
+it** — keep that file with the audio. `--license cc0` restricts results to public-domain
+clips, which carry no attribution obligation.
+
+It fetches Freesound's public MP3 previews, which the API serves with a plain key.
+Downloading original uploads needs OAuth2 and is deliberately out of scope; 128 kbps previews
+are fine for a soundboard.
+
+> **No scrapers ship with this project.** Bulk-downloading clips from meme-sound sites
+> generally breaches their terms of service, and the audio is usually someone else's
+> copyrighted work. The two scripts above are the supported path: bring audio you have the
+> right to use, or fetch audio that is explicitly licensed for reuse.
+
 ---
 
 ## Status

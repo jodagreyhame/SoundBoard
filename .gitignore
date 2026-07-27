@@ -24,11 +24,17 @@ _*.png
 Thumbs.db
 desktop.ini
 
+# The clip library is user-supplied and never committed. No audio ships with this
+# project, and PRs adding audio are declined (see CONTRIBUTING.md).
+#
+# The leading slash is load-bearing: a bare `sounds/` matches at ANY depth and
+# would silently untrack internal/catalog/testdata/sounds/, which the catalog
+# tests need. Root-anchored, it matches only the library.
+/sounds/
+
 # Content work scratch
 sounds_src/
 *.part
 *.ytdl
-# Raw, un-normalized download temp files from the download scripts.
-sounds/**/.raw_*
 .raw_*
 *.exe~
