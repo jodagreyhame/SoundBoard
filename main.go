@@ -29,6 +29,7 @@ import (
 	"context"
 	"embed"
 	"log"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -141,8 +142,17 @@ func main() {
 			// app.OnCleanup (Backend.close, guarded to run exactly once), THEN stop
 			// the tray goroutine so its message loop returns and the process can exit
 			// cleanly.
+			//
+			// The three lines logged here bracket the two halves of shutdown, so a
+			// future hang is localised without re-instrumenting: no "cleanup done"
+			// line means it stuck in the backend teardown (see Backend.close, which
+			// logs per step), and no "complete" line means it stuck in stopTray.
+			start := time.Now()
+			log.Printf("shutdown: begin")
 			app.runCleanup()
+			log.Printf("shutdown: cleanup done, stopping tray")
 			stopTray()
+			log.Printf("shutdown: complete (%dms)", time.Since(start).Milliseconds())
 		},
 
 		Windows: &windows.Options{

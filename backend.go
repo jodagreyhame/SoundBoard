@@ -208,27 +208,44 @@ func newBackend() *Backend {
 // close runs the real cleanup ONCE: stop hotkeys, stop the engine, restore the
 // hijacked default mic, save settings, and free the audio context. Order mirrors
 // the Fyne main()'s deferred teardown. closeOnce guarantees it runs exactly once.
+//
+// Each step logs a line AFTER it returns, carrying its own elapsed ms, so a
+// shutdown that wedges is localised straight from the log with no rebuild: the
+// step that hung is the one AFTER the last line printed (the order is the order
+// below), and the "teardown: begin" line alone means it hung on the very first.
+// Timings also make a slow step obvious — these are normally sub-millisecond,
+// so a regression reads as seconds.
 func (b *Backend) close() {
 	b.closeOnce.Do(func() {
+		start := time.Now()
+		log.Printf("teardown: begin")
+		step := func(what string, fn func()) {
+			t := time.Now()
+			fn()
+			log.Printf("teardown: %s (%dms)", what, time.Since(t).Milliseconds())
+		}
+
 		if b.hotkeys != nil {
-			b.hotkeys.Close()
+			step("hotkeys closed", b.hotkeys.Close)
 		}
 		if b.engine != nil {
-			_ = b.engine.Stop()
+			step("engine stopped", func() { _ = b.engine.Stop() })
 		}
 		if b.setup != nil {
-			b.setup.Restore()
+			step("default mic restored", b.setup.Restore)
 		}
 		if b.settings != nil {
-			if err := b.settings.Save(); err != nil {
-				log.Printf("save settings: %v", err)
-			}
+			step("settings saved", func() {
+				if err := b.settings.Save(); err != nil {
+					log.Printf("save settings: %v", err)
+				}
+			})
 		}
 		if b.ctx != nil {
-			_ = b.ctx.Uninit()
-			b.ctx.Free()
-			b.ctx = nil
+			step("audio context uninit", func() { _ = b.ctx.Uninit() })
+			step("audio context freed", func() { b.ctx.Free(); b.ctx = nil })
 		}
+		log.Printf("teardown: complete (%dms total)", time.Since(start).Milliseconds())
 	})
 }
 
