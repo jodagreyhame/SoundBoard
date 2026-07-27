@@ -1,0 +1,67 @@
+# CI for SoundBoard.
+#
+# The module is Windows-only by construction: the audio routing is WASAPI +
+# IPolicyConfig, and internal/apm embeds a Windows DLL. There is no Linux or
+# macOS job because the code cannot build there.
+#
+# cgo is required (malgo/miniaudio and the vendored RNNoise C sources), so the
+# MinGW-w64 gcc that ships with windows-latest is a hard dependency.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build & test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+          cache: true
+
+      # cgo toolchain must be present or the build silently degrades.
+      - name: Verify gcc
+        run: gcc --version
+
+      - name: go vet
+        run: go vet ./...
+        env:
+          CGO_ENABLED: 1
+
+      - name: go build
+        run: go build ./...
+        env:
+          CGO_ENABLED: 1
+
+      - name: go test
+        run: go test -count=1 ./...
+        env:
+          CGO_ENABLED: 1
+
+      # The real-time audio path is the part most worth race-checking.
+      - name: go test -race (audio)
+        run: go test -race -count=1 ./internal/audio/... ./internal/catalog/...
+        env:
+          CGO_ENABLED: 1
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

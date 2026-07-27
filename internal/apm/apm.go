@@ -4,8 +4,16 @@
 // filter, noise suppression, and automatic gain control) with the same DSP
 // library Discord itself uses.
 //
+// LICENSING: webrtc-apm.dll is BSD-3-Clause (plus the separate WebRTC PATENTS
+// grant) — see LICENSE and PATENTS in this directory. The DLL is NOT
+// only WebRTC: it statically links Abseil (Apache-2.0), libgcc/libstdc++
+// (GPL-3.0 with the GCC Runtime Library Exception) and mingw-w64 winpthreads.
+// Because the DLL is embedded and redistributed inside every binary, those
+// notices must ship with the binary too. Full texts and provenance are in
+// /THIRD_PARTY_NOTICES.md at the repo root.
+//
 // HOW IT LINKS: the APM is a self-contained WebRTC build shipped as a Windows DLL
-// (webrtc-apm.dll, BSD-3-Clause, the SoundFlow.Extensions.WebRtc.Apm /
+// (webrtc-apm.dll, the SoundFlow.Extensions.WebRtc.Apm /
 // LSXPrime/webrtc-audio-processing lineage). It is embedded into the binary and
 // loaded at RUNTIME via windows.LoadDLL — the C++ APM is therefore NEVER linked at
 // cgo compile time, so the whole module keeps building with the default MinGW gcc

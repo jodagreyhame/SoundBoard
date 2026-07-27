@@ -1,0 +1,28 @@
+WebRTC Audio Processing Module — vendored component
+===================================================
+
+webrtc-apm.dll and webrtc_apm_capi.h derive from the WebRTC project.
+The header in webrtc_apm_capi.h retains upstream's standard notice, which
+refers to three files "in the root of the source tree". Because this is a
+vendored component rather than a WebRTC checkout, those references resolve
+as follows:
+
+  LICENSE   -> internal/apm/LICENSE   (vendored verbatim, BSD-3-Clause)
+  PATENTS   -> internal/apm/PATENTS   (vendored verbatim, Additional IP
+                                       Rights Grant)
+  AUTHORS   -> not vendored. The upstream contributor roster is published at
+               https://webrtc.googlesource.com/src/+/main/AUTHORS
+
+LICENSE and PATENTS are the licence conditions and are reproduced in full.
+AUTHORS is a courtesy roster and is not a condition of BSD-3-Clause, so it is
+referenced rather than copied.
+
+webrtc_apm_capi.h is NOT verbatim upstream: it is derived from
+api/audio/audio_processing.h with an added extern "C" ABI so the module can be
+loaded at runtime via LoadLibrary instead of linked at cgo compile time.
+
+The DLL is a self-contained build and statically links further third-party
+code — Abseil (Apache-2.0), libgcc/libstdc++ (GPL-3.0 with the GCC Runtime
+Library Exception) and mingw-w64 winpthreads. Because the DLL is embedded into
+every binary this project produces, those notices travel with the binary too.
+Full texts and provenance: /THIRD_PARTY_NOTICES.md at the repository root.

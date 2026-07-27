@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussions
+    url: https://github.com/jodagreyhame/SoundBoard/discussions
+    about: Use discussions for general questions, ideas, and help requests.
+  - name: Security vulnerabilities
+    url: https://github.com/jodagreyhame/SoundBoard/security/advisories/new
+    about: Report security issues privately, not as public issues.
