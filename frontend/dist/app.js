@@ -12,7 +12,8 @@
  *     outside the Wails runtime.
  *   - Events (window.runtime.EventsOn): gateLevel -> animate the ring meter;
  *     routingStatus -> update the banner + sidebar pill; installProgress ->
- *     drive the install/engage dialog.
+ *     drive the install/engage dialog; nowPlaying -> reconcile the NOW PLAYING
+ *     chips so a chip disappears when its clip actually ends.
  *
  * Data model (the binding contract, app.go State): theme, routing{state,detail,
  * canEngage}, categories[{name,count}], clips[{id,name,category,favorite}],
@@ -88,7 +89,8 @@
     favorites: [],            // []clipID
     clips: [],                // normalized [{id,name,category,favorite}]
     cats: [],                 // [{name,count}]
-    playing: [],              // [{id,name,chip}] now-playing chips (client-side)
+    playing: [],              // [{id,name,chip,seen,at}] now-playing chips, reconciled against the "nowPlaying" event
+    npDismissed: {},          // clipID -> ms deadline; suppresses a chip we just ✕'d until the engine agrees
     selected: null,           // selected clipID (per-clip mixer row)
     vol: { mic: 100, master: 100, monitor: 100 }, // percent (0..200 in the audio panel)
     clipGain: 100,
@@ -404,16 +406,27 @@
     S.selected = c.id;
     if (S._perClip[c.id] != null) S.clipGain = S._perClip[c.id];
     else S.clipGain = 100;
-    // Push to now-playing chips (most-recent-first, capped at 5).
-    S.playing = [{ id: c.id, name: c.name, chip: chipFor(c.category) }]
+    // Push to now-playing chips (most-recent-first, capped at NP_MAX). This is
+    // OPTIMISTIC: it shows instantly, and the "nowPlaying" event then owns the
+    // chip's lifetime — `seen:false` means the engine has not confirmed it yet,
+    // so reconcileNowPlaying will not retire it during NP_GRACE_MS.
+    delete S.npDismissed[c.id];
+    S.playing = [{ id: c.id, name: c.name, chip: chipFor(c.category), seen: false, at: Date.now() }]
       .concat(S.playing.filter(function (p) { return p.id !== c.id; }))
-      .slice(0, 5);
+      .slice(0, NP_MAX);
     renderNowPlaying();
     renderStopBtn();
     renderMixer();
   }
 
+  // stopOne is a chip's ✕. It must actually STOP the clip in the engine, not
+  // just hide the chip: the engine is the source of truth for what is playing,
+  // so a purely local removal would be undone by the very next nowPlaying event.
+  // The chip is removed optimistically and the id parked in npDismissed so the
+  // in-flight event that still lists it cannot flash it back.
   function stopOne(id) {
+    call("StopClip", id);
+    S.npDismissed[id] = Date.now() + NP_DISMISS_MS;
     S.playing = S.playing.filter(function (p) { return p.id !== id; });
     renderNowPlaying();
     renderStopBtn();
@@ -421,9 +434,60 @@
 
   function stopAll() {
     call("StopAll");
+    var now = Date.now();
+    S.playing.forEach(function (p) { S.npDismissed[p.id] = now + NP_DISMISS_MS; });
     S.playing = [];
     renderNowPlaying();
     renderStopBtn();
+  }
+
+  // --- now-playing reconciliation -------------------------------------------
+  // The engine publishes the FULL set of clips its mixer is still playing (see
+  // internal/audio/nowplaying.go); app.go polls it at ~20 Hz and emits it here.
+  // Reconciling against that full set — rather than acting on one-shot "ended"
+  // pulses — is what makes this self-correcting: a dropped event is fixed by the
+  // next one, and no timer has to guess a clip's length.
+  var NP_MAX = 5;          // chips shown at once (most-recent-first)
+  var NP_GRACE_MS = 600;   // how long an unconfirmed chip survives before we accept it never started
+  var NP_DISMISS_MS = 700; // how long a ✕'d id ignores the engine, covering the event already in flight
+
+  function reconcileNowPlaying(ids) {
+    var now = Date.now();
+    var live = {};
+    (ids || []).forEach(function (id) { live[id] = true; });
+
+    // Expire stale dismissals: once the engine stops listing a clip, the ✕ has
+    // taken effect and the id can be shown again on a later trigger.
+    Object.keys(S.npDismissed).forEach(function (id) {
+      if (!live[id] || S.npDismissed[id] <= now) delete S.npDismissed[id];
+    });
+
+    var next = S.playing.filter(function (p) {
+      if (S.npDismissed[p.id]) return false;
+      if (live[p.id]) { p.seen = true; return true; }
+      // Not playing according to the engine. Retire it if the engine had ever
+      // confirmed it (it finished — this is the fix), or if it was never
+      // confirmed within the grace window (the trigger never became audio, e.g.
+      // the engine is not running).
+      return !p.seen && (now - p.at) < NP_GRACE_MS;
+    });
+
+    // Adopt clips the engine reports that we have no chip for — a hotkey or tray
+    // trigger, or a chip evicted by the NP_MAX cap that is still playing.
+    var have = {};
+    next.forEach(function (p) { have[p.id] = true; });
+    (ids || []).forEach(function (id) {
+      if (have[id] || S.npDismissed[id]) return;
+      var c = clipById(id);
+      if (!c) return;
+      next.push({ id: c.id, name: c.name, chip: chipFor(c.category), seen: true, at: now });
+    });
+    next = next.slice(0, NP_MAX);
+
+    var changed = next.length !== S.playing.length ||
+      next.some(function (p, i) { return p.id !== S.playing[i].id; });
+    S.playing = next;
+    if (changed) { renderNowPlaying(); renderStopBtn(); }
   }
 
   function toggleFavorite(id) {
@@ -1220,6 +1284,13 @@
         if (S.dialog === "progressInstall") openDialog("installSuccess");
         else if (S.dialog === "progressEngage") openDialog("engageSuccess");
       }
+    });
+
+    // nowPlaying: {clips:[clipID]} — the FULL set the engine is still playing,
+    // emitted only when it changes. Reconcile the chip row against it so a chip
+    // disappears by itself the moment its clip ends.
+    r.EventsOn("nowPlaying", function (p) {
+      reconcileNowPlaying(p && p.clips ? p.clips : []);
     });
 
     // installProgress: {msg, done, err} — drive the dialog body/outcome.

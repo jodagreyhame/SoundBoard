@@ -47,6 +47,13 @@ type App struct {
 	// tick). Guarded by lcMu.
 	lastRouting RoutingStatus
 
+	// lastPlaying is the most recent now-playing clip set the events loop emitted,
+	// used the same way as lastRouting: re-emit only on an actual change so the
+	// frontend is not re-rendering the chip row 20 times a second. A nil value
+	// means "never emitted", which is distinct from an emitted empty set. Guarded
+	// by lcMu.
+	lastPlaying []string
+
 	// cleanup is the backend teardown registered via OnCleanup (engine.Stop,
 	// restore the default mic, save config — exactly backend.go's Backend.close).
 	// The lifecycle calls it through runCleanup, which fires it exactly once no
@@ -381,6 +388,16 @@ func (a *App) Play(clipID string) {
 func (a *App) StopAll() {
 	if b := a.getBackend(); b != nil && b.engine != nil {
 		b.engine.StopAll()
+	}
+}
+
+// StopClip silences one clip on both paths — the action behind a NOW PLAYING
+// chip's ✕. Without it the ✕ would only hide the chip locally and the next
+// nowPlaying event would immediately bring it back, because the clip really is
+// still playing. A missing clip or a not-yet-running engine is a safe no-op.
+func (a *App) StopClip(clipID string) {
+	if b := a.getBackend(); b != nil && b.engine != nil {
+		b.engine.StopClip(clipID)
 	}
 }
 
@@ -1010,14 +1027,79 @@ func (a *App) eventsLoop() {
 			if changed {
 				a.emitRoutingStatus(rs)
 			}
+
+			a.pollNowPlaying(b)
 		}
 	}
+}
+
+// pollNowPlaying reads the engine's published now-playing set and emits it when
+// it differs from the last one emitted, so the frontend's NOW PLAYING chips and
+// "Stop · N" counter clear themselves when a clip finishes.
+//
+// This is the UI half of the fix for chips that never went away: the RT mix
+// callback republishes the live cursor set every buffer (see
+// internal/audio/nowplaying.go) because it may not emit an event itself, and
+// this poll — on the SAME 20 Hz ticker that already drives gateLevel — is what
+// turns that into a frontend event. The event carries the whole current set, not
+// an "ended" pulse, so it is idempotent and a dropped event self-heals on the
+// next tick.
+//
+// An inconsistent snapshot (the seqlock reader losing every retry) or a stopped
+// engine is NOT reported as an empty set: the former keeps the previous view, the
+// latter genuinely has nothing playing and emits empty exactly once.
+func (a *App) pollNowPlaying(b *Backend) {
+	var ids []string
+	if b.audioRunning && b.engine != nil {
+		got, ok := b.engine.PlayingClips()
+		if !ok {
+			return // snapshot was torn; keep the current view and retry next tick.
+		}
+		ids = got
+	}
+
+	a.lcMu.Lock()
+	changed := a.lastPlaying == nil || !sameIDs(a.lastPlaying, ids)
+	if changed {
+		a.lastPlaying = ids
+	}
+	a.lcMu.Unlock()
+	if changed {
+		a.emitNowPlaying(ids)
+	}
+}
+
+// sameIDs reports whether two clip-ID sets are identical, order included. The
+// engine returns them in trigger order, so an order change is a real change.
+func sameIDs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // emitGateLevel pushes the live mic-open level [0..1].
 func (a *App) emitGateLevel(level float64) {
 	if ctx := a.context(); ctx != nil {
 		runtime.EventsEmit(ctx, "gateLevel", map[string]any{"level": level})
+	}
+}
+
+// emitNowPlaying pushes the current set of playing clip IDs. The payload is
+// always the FULL set (never a delta), so the frontend can reconcile its chip
+// row against it and any dropped event is corrected by the next one. clips is
+// emitted as a non-nil slice so the JS side always sees an array.
+func (a *App) emitNowPlaying(clips []string) {
+	if clips == nil {
+		clips = []string{}
+	}
+	if ctx := a.context(); ctx != nil {
+		runtime.EventsEmit(ctx, "nowPlaying", map[string]any{"clips": clips})
 	}
 }
 

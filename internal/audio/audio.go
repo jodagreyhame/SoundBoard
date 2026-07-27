@@ -120,10 +120,16 @@ func clampGain(g float32) float32 {
 // value is treated as unity (1.0) by gainOf so cursors constructed without an
 // explicit gain — including those in the existing mix tests — play at full
 // level; a genuinely silent (per-clip zero) clip is never triggered.
+//
+// idx is the clipRegistry index of the clip this cursor is playing (see
+// nowplaying.go). It is captured at Trigger time so the RT callback can publish
+// WHICH clips are active — and honour a per-clip stop — using only integer
+// comparisons, never a string or a map lookup on the audio thread.
 type clipCursor struct {
 	pcm  []float32
 	pos  int
 	gain float32
+	idx  int32
 }
 
 // done reports whether the cursor has played all of its samples.
@@ -147,6 +153,7 @@ func gainOf(c *clipCursor) float32 {
 type pendingClip struct {
 	clip *catalog.Clip
 	gain float32
+	idx  int32 // clipRegistry index, resolved off the RT path in TriggerGain
 }
 
 // float32bits / float32frombits store a float32 in an atomic.Uint32.
@@ -191,6 +198,26 @@ type Engine struct {
 	// contends with the lifecycle lock or the RT path.
 	stopFlag    atomic.Bool
 	monStopFlag atomic.Bool
+
+	// stopClipIdx / monStopClipIdx are the PER-CLIP analogue of the flags above,
+	// raised by StopClip (the UI's per-chip ✕) and consumed by the owning RT
+	// callback. The value is a clipRegistry index PLUS ONE so that zero means "no
+	// request"; each callback Swaps its own field to 0 at the top of a buffer and,
+	// on a non-zero value, drops every cursor whose idx matches — an integer
+	// compare and an in-place compaction, so still allocation-free and lock-free.
+	// Only one request is held at a time: if two arrive between buffers the later
+	// wins and the earlier clip keeps playing, which the UI reports truthfully
+	// because the now-playing set is derived from the cursors, not from the click.
+	stopClipIdx    atomic.Int32
+	monStopClipIdx atomic.Int32
+
+	// playing is the RT-published set of currently-playing clips (nowplaying.go).
+	// The duplex callback republishes it every buffer; the App's events loop polls
+	// it at ~20 Hz and emits a "nowPlaying" event when the set changes. registry
+	// interns clip IDs to the int32 indices stored in it, so the audio thread only
+	// ever deals in integers.
+	playing  playSet
+	registry clipRegistry
 
 	// micGainBits / masterGainBits / monitorGainBits hold three INDEPENDENT
 	// levels as float32 bit patterns, written by the UI thread and read lock-free
@@ -743,6 +770,13 @@ func (e *Engine) Stop() error {
 	e.monCursors = nil
 	drainPending(e.pending)
 	drainPending(e.monPending)
+
+	// Nothing is playing any more and no callback will run to say so, so clear the
+	// published now-playing set here (and any unconsumed per-clip stop request).
+	// Without this the UI would keep showing the chips that were live at teardown.
+	e.playing.reset()
+	e.stopClipIdx.Store(0)
+	e.monStopClipIdx.Store(0)
 	return nil
 }
 
@@ -785,7 +819,12 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 	if g == 0 {
 		return
 	}
-	pc := pendingClip{clip: clip, gain: g}
+	// Intern the CANONICAL clip ID (clip.ID, not the possibly extension-suffixed
+	// id the caller passed) to a stable int32 so the RT callback can publish which
+	// clips are playing without ever touching a string or a map. This is a mutexed
+	// map op, but we are on the caller's (non-RT) goroutine — the same one that
+	// just decoded the clip — so it costs the audio thread nothing.
+	pc := pendingClip{clip: clip, gain: g, idx: e.registry.intern(clip.ID)}
 	select {
 	case e.pending <- pc:
 	default:
@@ -810,6 +849,48 @@ func (e *Engine) TriggerGain(id string, gain float32) {
 func (e *Engine) StopAll() {
 	e.stopFlag.Store(true)
 	e.monStopFlag.Store(true)
+}
+
+// StopClip silences every instance of ONE clip on both paths — the action behind
+// the UI's per-chip ✕. Like StopAll it only raises atomics; the RT callbacks do
+// the actual cursor drop at a buffer boundary (see clearOnStopClip), so no lock
+// or allocation lands on the audio thread. A clip that has never been triggered
+// has no registry index and therefore cannot be playing, so it is a no-op. Safe
+// to call from any goroutine.
+//
+// The request is best-effort by design: only one pending per-clip stop is held
+// per path, so two ✕ clicks landing inside the same ~4 ms buffer will keep the
+// first clip playing. That is not a UI bug — the now-playing set is derived from
+// the live cursors, so the surviving clip's chip correctly stays until it really
+// stops.
+func (e *Engine) StopClip(id string) {
+	clip := e.lib.Get(id)
+	if clip == nil {
+		return
+	}
+	idx, ok := e.registry.lookup(clip.ID)
+	if !ok {
+		return
+	}
+	e.stopClipIdx.Store(idx + 1)
+	e.monStopClipIdx.Store(idx + 1)
+}
+
+// PlayingClips returns the canonical IDs of the clips currently playing on the
+// duplex (-> Discord) path, oldest trigger first and de-duplicated, plus whether
+// the read was consistent. It is a lock-free seqlock read of the set the RT
+// callback publishes each buffer (see nowplaying.go), so it is safe to poll from
+// the UI goroutine and costs the audio thread nothing.
+//
+// A FALSE second return means the snapshot could not be taken cleanly; the
+// caller must keep its previous view rather than treat the empty result as
+// "nothing is playing".
+func (e *Engine) PlayingClips() ([]string, bool) {
+	idx, ok := e.playing.snapshot(nil)
+	if !ok {
+		return nil, false
+	}
+	return e.registry.names(idx), true
 }
 
 // The real-time mic->cable data callback (duplexCallback) and its helpers
@@ -849,6 +930,7 @@ func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 		// discarded (truncated) without mixing.
 		e.monCursors = drainInto(e.monPending, e.monCursors)
 		e.monCursors = clearOnStop(&e.monStopFlag, e.monCursors, e.monPending)
+		e.monCursors = clearOnStopClip(&e.monStopClipIdx, e.monCursors)
 		e.monCursors = e.monCursors[:0]
 
 		e.fillMonitorFromTap(out[:n], e.monitorGain())
@@ -859,6 +941,7 @@ func (e *Engine) monitorCallback(pOutput, pInput []byte, frameCount uint32) {
 	// monitor gain.
 	e.monCursors = drainInto(e.monPending, e.monCursors)
 	e.monCursors = clearOnStop(&e.monStopFlag, e.monCursors, e.monPending)
+	e.monCursors = clearOnStopClip(&e.monStopClipIdx, e.monCursors)
 	e.monCursors = mixInto(out[:n], nil, e.monCursors, e.monitorGain())
 }
 
@@ -933,7 +1016,7 @@ func drainInto(ch <-chan pendingClip, cursors []*clipCursor) []*clipCursor {
 	for {
 		select {
 		case pc := <-ch:
-			cursors = append(cursors, &clipCursor{pcm: pc.clip.PCM, gain: pc.gain})
+			cursors = append(cursors, &clipCursor{pcm: pc.clip.PCM, gain: pc.gain, idx: pc.idx})
 		default:
 			return cursors
 		}
@@ -954,6 +1037,32 @@ func clearOnStop(flag *atomic.Bool, cursors []*clipCursor, pending chan pendingC
 	}
 	drainPending(pending)
 	return cursors[:0]
+}
+
+// clearOnStopClip consumes a one-shot PER-CLIP stop request for an RT callback.
+// The flag holds a clipRegistry index plus one (0 == no request); Swap takes the
+// request and clears it in a single atomic op. On a request it compacts every
+// cursor playing that clip out of the callback's slice IN PLACE — reusing the
+// same backing array, exactly like mixInto's compaction, so nothing is
+// allocated. Cursors for other clips keep their position and keep playing.
+//
+// Clips still sitting in the pending channel are deliberately left alone: a clip
+// triggered microseconds before the ✕ may not be a cursor yet, and it will start
+// and then show a chip that is TRUE (it really is playing). Allocation-free and
+// lock-free; only ever called by the callback that owns `cursors`.
+func clearOnStopClip(flag *atomic.Int32, cursors []*clipCursor) []*clipCursor {
+	v := flag.Swap(0)
+	if v == 0 {
+		return cursors
+	}
+	want := v - 1
+	kept := cursors[:0]
+	for _, c := range cursors {
+		if c.idx != want {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 // drainPending empties a pending channel without consuming into cursors. Used

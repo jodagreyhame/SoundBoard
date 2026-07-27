@@ -27,6 +27,7 @@ package audio
 func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	e.cursors = drainInto(e.pending, e.cursors)
 	e.cursors = clearOnStop(&e.stopFlag, e.cursors, e.pending)
+	e.cursors = clearOnStopClip(&e.stopClipIdx, e.cursors)
 
 	out := bytesAsF32(pOutput)
 	mic := bytesAsF32(pInput)
@@ -68,6 +69,15 @@ func (e *Engine) duplexCallback(pOutput, pInput []byte, frameCount uint32) {
 	soundboard := e.duckedMaster()
 
 	e.cursors = mixInto(out[:n], mic, e.cursors, soundboard)
+
+	// NOW-PLAYING PUBLICATION. mixInto has just compacted every cursor that
+	// finished during this buffer out of e.cursors, so what remains IS the set of
+	// clips still playing. Republish it (see nowplaying.go): a couple of atomic
+	// stores, no allocation, no lock — the UI's events loop polls it at ~20 Hz and
+	// tells the frontend, which is how a finished clip's chip disappears on its own.
+	// Publishing the whole set every buffer (rather than a one-shot "ended" pulse)
+	// is what makes a missed poll self-healing.
+	e.playing.publish(e.cursors)
 
 	// CONFIDENCE MONITOR TAP. `out[:n]` now holds the EXACT signal going to the
 	// cable (processedMic + clips) — what Discord receives. When the monitor is in
