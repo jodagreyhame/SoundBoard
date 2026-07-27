@@ -8,8 +8,8 @@ package audio
 // stores every value in one atomic, read once per worker frame (RT-safe).
 
 import (
-	"soundboard/internal/apm"
-	"soundboard/internal/config"
+	"github.com/jodagreyhame/SoundBoard/internal/apm"
+	"github.com/jodagreyhame/SoundBoard/internal/config"
 )
 
 // SetNoiseSuppressionLevel selects the APM noise-suppression aggressiveness by its

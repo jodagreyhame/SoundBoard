@@ -20,7 +20,7 @@ import (
 	"sync"
 	"testing"
 
-	"soundboard/internal/catalog"
+	"github.com/jodagreyhame/SoundBoard/internal/catalog"
 )
 
 // TestMonitorSourceDefaultAndSetGet pins the source enum surface: a fresh engine
