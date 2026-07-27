@@ -15,8 +15,9 @@
 //     subscribes to (gateLevel / routingStatus / installProgress).
 //   - A companion system tray (getlantern/systray, systray.go) runs on its own
 //     goroutine alongside the Wails main loop: icon + Open/Quit menu. Closing the
-//     window hides to tray (OnBeforeClose); tray Open reshows it; tray Quit ends
-//     the process after the Wails shutdown cleanup.
+//     window QUITS; the sidebar's Tray button hides to the tray instead, and tray
+//     Open reshows it. Every exit unwinds through the Wails shutdown cleanup,
+//     which restores the user's default microphone.
 //
 // The bound App methods are wired to the real backend (internal/audio,
 // internal/setup, internal/config, internal/catalog, internal/hotkeys) via the
@@ -33,7 +34,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // assets embeds the built frontend. With a vanilla (no-build) frontend the
@@ -79,10 +79,9 @@ func main() {
 		// Frameless: the HTML titlebar IS the window chrome and drag region.
 		Frameless: true,
 
-		// Tray app lifecycle: closing the window hides it (handled in OnBeforeClose)
-		// rather than quitting, so the soundboard/hotkeys keep running. We manage
-		// the hide ourselves to also keep the tray in sync, so HideWindowOnClose is
-		// left false and OnBeforeClose returns prevent=true.
+		// Closing the window quits (see OnBeforeClose). Left false so the close
+		// reaches OnBeforeClose as a normal shutdown rather than wails silently
+		// hiding the window behind our back.
 		HideWindowOnClose: false,
 
 		AssetServer: &assetserver.Options{
@@ -105,16 +104,23 @@ func main() {
 		},
 		// Close-to-tray: prevent the real close, hide the window instead. The tray
 		// (or the in-window Quit) is the only path that truly exits.
-		OnBeforeClose: func(ctx context.Context) (prevent bool) {
-			// Wails calls this from inside Frontend.Quit() as well as on a real
-			// close, and abandons the exit if we veto. So ask the App whether a
-			// quit is already under way: if it is, let the close through or the
-			// process can never exit.
-			if !app.ShouldPreventClose() {
-				return false
-			}
-			wailsruntime.WindowHide(ctx)
-			return true
+		// Closing the window QUITS. Every close gesture — the titlebar X, the
+		// taskbar's Close, Alt+F4 — arrives here as one WM_CLOSE with no way to tell
+		// them apart (the callback takes no source argument), so "close" has to mean
+		// one thing. It means quit.
+		//
+		// Running in the background is still available, but only when asked for
+		// explicitly: the sidebar's Tray button calls App.HideToTray, which hides
+		// the window directly and never reaches this callback.
+		//
+		// DO NOT reintroduce an unconditional `return true` here. Wails calls
+		// OnBeforeClose from inside its own Frontend.Quit() and abandons the exit if
+		// it vetoes, so a permanent veto silently disables EVERY quit path — tray
+		// Quit and the in-window button included — and the app can then only be
+		// force-killed. A force-kill skips OnShutdown, which is what restores the
+		// user's default microphone, so it strands the audio-device hijack too.
+		OnBeforeClose: func(_ context.Context) (prevent bool) {
+			return false
 		},
 		OnShutdown: func(ctx context.Context) {
 			// Single shutdown choke point. Every exit path (tray Quit, in-window

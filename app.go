@@ -58,13 +58,6 @@ type App struct {
 	// arriving together only trigger one runtime.Quit.
 	quitOnce sync.Once
 
-	// quitting records that a real exit was requested, so OnBeforeClose stops
-	// vetoing the close. This is load-bearing, not bookkeeping: wails'
-	// Frontend.Quit() consults OnBeforeClose and returns early if it vetoes, so a
-	// permanent veto makes runtime.Quit a no-op and the process unkillable from
-	// the UI. Guarded by lcMu.
-	quitting bool
-
 	// eventsOnce guards the live-events goroutine so startup launches it exactly
 	// once; stopEvents signals it to exit (closed by runCleanup).
 	eventsOnce sync.Once
@@ -858,12 +851,6 @@ func (a *App) HideToTray() {
 // the process can exit instead of hanging with a live tray and no window.
 func (a *App) Quit() {
 	a.quitOnce.Do(func() {
-		// Must precede runtime.Quit: wails calls OnBeforeClose from inside Quit and
-		// abandons the exit if it vetoes, so the veto has to be lifted first.
-		a.lcMu.Lock()
-		a.quitting = true
-		a.lcMu.Unlock()
-
 		if ctx := a.context(); ctx != nil {
 			runtime.Quit(ctx)
 			return
@@ -1048,17 +1035,4 @@ func (a *App) emitInstallProgress(msg string, done bool, errMsg string) {
 			"msg": msg, "done": done, "err": errMsg,
 		})
 	}
-}
-
-// ShouldPreventClose reports whether a close request should be turned into
-// hide-to-tray rather than an exit.
-//
-// True for an ordinary close (the window's X, the taskbar's Close, Alt+F4) so the
-// soundboard and global hotkeys keep running in the background. False once Quit
-// has been called, because wails' Frontend.Quit() runs OnBeforeClose and gives up
-// on the exit if it vetoes — leaving the app with no working quit path at all.
-func (a *App) ShouldPreventClose() bool {
-	a.lcMu.Lock()
-	defer a.lcMu.Unlock()
-	return !a.quitting
 }

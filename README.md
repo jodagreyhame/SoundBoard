@@ -8,8 +8,8 @@ WebView2 frontend**: a frameless window with a gradient titlebar, a category sid
 jump-to-section and a routing pill, a setup banner, a category-grouped clip grid, a bottom
 mixer dock, and a Mic & Audio view with a live ring meter. It has a **searchable,
 categorized grid** of clips and **in-app volume sliders**, plus a **system-tray icon** that
-reopens the window. Closing the window hides it to the tray; the soundboard and global
-hotkeys keep running in the background.
+reopens the window. Closing the window quits; use the tray button if you want the soundboard
+and global hotkeys to keep running in the background.
 
 There is **no Discord bot, no token, no `discordgo`**. The mechanism is a virtual audio
 cable (VB-CABLE): the app opens a single duplex audio device, mixes your real mic input
@@ -95,8 +95,8 @@ two views — **Soundboard** and **Mic & Audio** — selected from the sidebar.
   the cable is present but not yet hijacking the default mic. When routing is active the banner
   is green. Install/engage progress and outcomes show in a modal dialog.
 - **System tray** — the tray icon reopens the window (and a menu offers *Open SoundBoard* /
-  *Quit*). Closing the window **hides to the tray** instead of quitting, so the soundboard and
-  hotkeys keep running.
+  *Quit*). Closing the window **quits**. To keep the soundboard and global hotkeys running in
+  the background, use the sidebar's **Tray** button instead.
 
 The window opens at 1160×760 with a 900×620 minimum.
 
@@ -523,8 +523,8 @@ all best judged on a real call with real listeners.
 - **Web fonts load from Google Fonts over the network.** With no network the window falls back
   to `system-ui`: the layout is intact, the type is slightly different. Embedding the `.woff2`
   files into `frontend/dist` would make it fully offline; that is not done yet.
-- **Window chrome is the app's own frameless titlebar**, not native Windows chrome. Both the
-  restore and close glyphs **hide to tray**, matching the tray-app lifecycle.
+- **Window chrome is the app's own frameless titlebar**, not native Windows chrome. The close
+  glyph **quits**; the tray glyph hides to the tray.
 
 ---
 
@@ -567,7 +567,7 @@ Full attribution and licence texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_N
 ```
 soundboard/
 ├── main.go                  # entrypoint: wails.Run — frameless WebView2 window, embeds
-│                            #   frontend/dist, companion tray, close-to-tray, OnShutdown cleanup
+│                            #   frontend/dist, companion tray, close-quits, OnShutdown cleanup
 ├── app.go                   # Wails-bound App: methods the frontend calls (window.go.main.App.*) +
 │                            #   GetState snapshot + live events (gateLevel/routingStatus/installProgress)
 ├── backend.go               # adapts the real engine/catalog/setup/config/hotkeys to the bound App

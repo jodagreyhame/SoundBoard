@@ -1045,13 +1045,17 @@
     });
     $("demo-pop").addEventListener("click", function (e) { e.stopPropagation(); });
 
-    // Window controls.
+    // Window controls. The window is frameless, so these HTML buttons ARE the
+    // window chrome. Close means quit, matching the titlebar X of any other app
+    // and the OS-level close paths (taskbar Close, Alt+F4). Running in the
+    // background is the tray button's job, which is explicit about it.
     $("win-min").addEventListener("click", function () { call("Minimize"); });
     var hide = function () { call("HideToTray"); };
+    var quit = function () { call("Quit"); };
     $("win-tray").addEventListener("click", hide);
-    $("win-close").addEventListener("click", hide);
+    $("win-close").addEventListener("click", quit);
     $("foot-tray").addEventListener("click", hide);
-    $("foot-quit").addEventListener("click", function () { call("Quit"); });
+    $("foot-quit").addEventListener("click", quit);
 
     // Search.
     var search = $("search");
