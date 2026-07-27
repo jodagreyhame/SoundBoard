@@ -270,11 +270,27 @@ a log file (see [Run](#run)).
 ### Build the shipping binary (plain `go build`, no Wails CLI)
 
 ```bash
-CGO_ENABLED=1 go build -trimpath -ldflags "-H=windowsgui" -o soundboard.exe .
+CGO_ENABLED=1 go build -trimpath -tags desktop,production -ldflags "-H=windowsgui -s -w" -o soundboard.exe .
 ```
 
-Functionally equivalent (same entrypoint, same embedded frontend); it just skips the Wails
-CLI's icon/manifest packaging and produces a larger, un-stripped binary.
+> **`-tags desktop,production` is mandatory, not an optimisation.** Wails guards its real
+> `CreateApp` behind `//go:build !dev && !production && !bindings`. Build without one of those
+> tags and you still get a 15 MiB executable that links, runs, and exits 0 from `go build` —
+> but at launch it shows only a message box reading *"Wails applications will not build without
+> the correct build tags"*, because the stub `CreateApp` was compiled in instead of the real
+> one. There is no compile-time error and no warning; the failure appears only when a user runs
+> it. `wails build` passes these tags for you, which is why the CLI path cannot hit this.
+>
+> To check a binary you already have:
+> ```bash
+> strings -a soundboard.exe | grep -c "will not build without the correct build tags"
+> ```
+> `0` is a real build. `1` means you shipped the stub.
+
+Functionally equivalent to `wails build` (same entrypoint, same embedded frontend); it just
+skips the Wails CLI's icon/manifest packaging. `-s -w` strips the symbol table and DWARF, which
+is what `wails build` does in production mode — omit them and the binary is ~20 MiB instead of
+~16 MiB.
 
 > **The WebRTC APM DLL is embedded — nothing to ship alongside the exe.** `webrtc-apm.dll`
 > (~4.3 MiB, BSD-3-Clause) lives in `internal/apm/` and is pulled into the binary with
@@ -293,8 +309,9 @@ CLI's icon/manifest packaging and produces a larger, un-stripped binary.
 > slightly less useful stack traces. It is not a Wails or cgo concern; it applies to every Go
 > binary you hand to someone else.
 
-> **Binary size.** The `wails build` production binary is roughly **16 MiB**; the plain
-> `go build` one is roughly **20 MiB** (Wails strips debug symbols in production mode, `go build`
+> **Binary size.** Both paths produce roughly **16 MiB** when built as documented above. Drop
+> `-s -w` from the plain `go build` and it grows to roughly **20 MiB** (Wails strips debug
+> symbols in production mode, a bare `go build`
 > does not). Sounds are **not** embedded — they load from the `sounds/` folder at runtime; the
 > size is the cgo miniaudio + RNNoise runtime, the **embedded ~4.3 MiB WebRTC APM DLL**, and the
 > (small) embedded HTML/CSS/JS frontend, and is independent of how many clips you use.

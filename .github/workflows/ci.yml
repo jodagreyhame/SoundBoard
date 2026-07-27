@@ -49,6 +49,22 @@ jobs:
         env:
           CGO_ENABLED: 1
 
+      # Wails hides its real CreateApp behind `!dev && !production && !bindings`.
+      # A build missing those tags still compiles, links and exits 0 — it only
+      # fails when a user launches it and gets a "wrong build tags" message box.
+      # Build the shipping binary the documented way and assert the stub is absent.
+      - name: Build shipping binary and assert it is not the Wails stub
+        shell: bash
+        run: |
+          go build -trimpath -tags desktop,production -ldflags "-H=windowsgui -s -w" -o soundboard.exe .
+          if strings -a soundboard.exe | grep -q "will not build without the correct build tags"; then
+            echo "::error::Binary contains the Wails stub CreateApp — build tags are missing."
+            exit 1
+          fi
+          echo "OK: real CreateApp linked."
+        env:
+          CGO_ENABLED: 1
+
       # The real-time audio path is the part most worth race-checking.
       - name: go test -race (audio)
         run: go test -race -count=1 ./internal/audio/... ./internal/catalog/...
