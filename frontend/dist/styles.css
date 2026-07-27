@@ -192,15 +192,6 @@ html, body {
 .winbtn.close:hover { background: var(--error); color: #fff; }
 
 /* Settings (⚙) demo popover anchored under the titlebar button. */
-.demo-pop {
-  position: absolute; top: 36px; right: 0; width: 230px;
-  background: var(--elev); border: 1px solid var(--line2); border-radius: 11px;
-  padding: 9px; z-index: 40; box-shadow: var(--shadow); animation: pop .14s ease;
-}
-.demo-pop .hdr { font-size: 9px; font-weight: 800; letter-spacing: .6px; color: var(--faint); padding: 4px 6px; }
-.demo-pop .sep { height: 1px; background: var(--line); margin: 6px 0; }
-.demo-pop .row { border-radius: 7px; padding: 7px 9px; font-size: 12px; font-weight: 600; color: var(--dim); cursor: pointer; }
-.demo-pop .row.active { color: var(--fg); background: var(--elev2); }
 
 .body { flex: 1; min-height: 0; display: flex; }
 
@@ -266,27 +257,6 @@ html, body {
 .hidden { display: none !important; }
 
 /* Setup banner (3 states). */
-.banner-wrap { flex: none; padding: 14px 18px 0; }
-.banner {
-  display: flex; align-items: center; gap: 12px;
-  border-radius: 12px; padding: 11px 15px; border: 1px solid;
-}
-.banner.engaged { background: var(--ok-bg); border-color: var(--success); }
-.banner.warn { background: var(--warn-bg); border-color: var(--warning); }
-.banner .b-check {
-  flex: none; width: 24px; height: 24px; border-radius: 50%;
-  background: var(--success); color: #fff;
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 800; font-size: 14px;
-}
-.banner .b-warn { flex: none; color: var(--warning); font-size: 19px; }
-.banner .b-text { flex: 1; font-size: 13px; font-weight: 600; }
-.banner.engaged .b-text { flex: 0 1 auto; }
-.banner .b-btn {
-  flex: none; display: flex; align-items: center; gap: 7px;
-  background: var(--warning); color: #1a1208; border: none; border-radius: 9px;
-  padding: 8px 15px; font-family: inherit; font-weight: 700; font-size: 12.5px; cursor: pointer;
-}
 
 /* Search row + Stop-all. */
 .search-row { flex: none; display: flex; gap: 10px; padding: 14px 18px; }
@@ -569,3 +539,19 @@ html, body {
   .tile { width: 100%; }
   .grid { flex-direction: column; }
 }
+
+/* ---- Routing status pill + popup -----------------------------------------
+   The pill is the ONLY routing-status surface (there is no banner). When
+   healthy it is an inert badge; when something needs fixing it turns red and
+   becomes the button that opens the popup carrying the install/engage action. */
+.conn-pill.actionable { border: 1px solid var(--error); }
+.conn-pill.actionable:hover { filter: brightness(1.18); }
+.sidebar-footer { position: relative; }
+.conn-pop {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 8px);
+  background: var(--elev2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px; box-shadow: 0 12px 30px rgba(0,0,0,.45); z-index: 40;
+}
+.conn-pop .cp-title { font-size: 12px; font-weight: 800; color: var(--error); margin-bottom: 6px; }
+.conn-pop .cp-body  { font-size: 11.5px; line-height: 1.45; color: var(--dim); margin-bottom: 10px; }
+.conn-pop .cp-btn   { width: 100%; justify-content: center; font-weight: 700; }

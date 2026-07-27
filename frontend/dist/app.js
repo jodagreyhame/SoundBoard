@@ -109,7 +109,7 @@
     // attenuation (duck) on/off. (Noise suppression is the segmented nsTier above;
     // the old inert "force through" row is retired from the panel.)
     toggles: { advVad: true, echo: false, agc: false, duck: false },
-    demoOpen: false,
+    connOpen: false,          // routing popup (opened from the red sidebar pill)
     dialog: null              // dialog key or null
   };
 
@@ -263,43 +263,58 @@
   }
 
   // ===========================================================================
-  // ROUTING BANNER + sidebar pill (3 states)
+  // ROUTING STATUS — the sidebar pill is the ONLY status surface.
   // ===========================================================================
-  // routing.state: "absent" (not detected) | "present" (detected, not engaged)
-  //              | "engaged" (active).
-  function renderBanner() {
+  // There is deliberately no banner. A persistent strip across the top invited
+  // the app to narrate a state it cannot actually observe, and it spent that
+  // space asserting things about Discord that are not knowable from here.
+  //
+  // routing.state: "absent" (no cable) | "present" (cable, not engaged) | "engaged".
+  //
+  // Healthy  -> green badge, not interactive. It reports a fact and asks nothing.
+  // Problem  -> RED, and becomes a button. Clicking opens a popup that explains
+  //             the problem and carries the action. That popup is now the ONLY
+  //             route to install/engage, since the banner's button is gone.
+  function renderStatus() {
     var r = S.snap.routing || {};
-    var b = $("banner");
-    b.innerHTML = "";
-    if (r.state === "engaged") {
-      b.className = "banner engaged";
-      b.innerHTML =
-        '<span class="b-check">✓</span>' +
-        '<span class="b-text">' + esc(r.detail || "Default mic points at CABLE Output.") + "</span>";
-    } else {
-      b.className = "banner warn";
-      var present = r.state === "present";
-      var text = r.detail || (present
-        ? "VB-CABLE found — engage routing to point your default mic at it."
-        : "VB-CABLE not detected — install it to route the soundboard into your mic.");
-      var label = present ? "Engage routing" : "Install / Fix audio routing";
-      b.innerHTML =
-        '<span class="b-warn">⚠</span>' +
-        '<span class="b-text">' + esc(text) + "</span>" +
-        '<button class="ibtn b-btn" type="button">' +
-        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1a1208" stroke-width="2.3" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>' +
-        esc(label) + "</button>";
-      b.querySelector(".b-btn").addEventListener("click", onInstallRouting);
-    }
-
-    // Sidebar pill.
     var engaged = r.state === "engaged";
+    var present = r.state === "present";
+
     var pill = $("conn-pill"), dot = $("conn-dot"), lab = $("conn-label");
-    pill.style.background = engaged ? "var(--ok-bg)" : "var(--warn-bg)";
-    dot.style.background = engaged ? "var(--success)" : "var(--warning)";
-    dot.style.boxShadow = engaged ? "0 0 8px var(--success)" : "none";
-    lab.style.color = engaged ? "var(--success)" : "var(--warning)";
-    lab.textContent = engaged ? "Mic → CABLE Output" : "Routing needs setup";
+    pill.style.background = engaged ? "var(--ok-bg)" : "var(--error-bg, rgba(240,80,80,.14))";
+    dot.style.background  = engaged ? "var(--success)" : "var(--error)";
+    dot.style.boxShadow   = engaged ? "0 0 8px var(--success)" : "0 0 8px var(--error)";
+    lab.style.color       = engaged ? "var(--success)" : "var(--error)";
+    lab.textContent       = engaged ? "Mic → CABLE Output"
+                          : present ? "Routing not engaged"
+                                    : "VB-CABLE missing";
+
+    // Only actionable states are clickable.
+    pill.classList.toggle("actionable", !engaged);
+    pill.style.cursor = engaged ? "default" : "pointer";
+    pill.setAttribute("role", engaged ? "status" : "button");
+    if (engaged) { S.connOpen = false; }
+
+    renderConnPop();
+  }
+
+  // The popup that replaces the banner. Shown only from the red pill.
+  function renderConnPop() {
+    var pop = $("conn-pop");
+    show(pop, !!S.connOpen);
+    if (!S.connOpen) return;
+
+    var r = S.snap.routing || {};
+    var present = r.state === "present";
+    $("conn-pop-title").textContent = present ? "Routing not engaged" : "VB-CABLE is not installed";
+    // r.detail comes from the backend and describes only local state.
+    $("conn-pop-body").textContent = r.detail || (present
+      ? "VB-CABLE is installed but your default microphone does not point at it."
+      : "SoundBoard needs the VB-CABLE virtual audio device to send clips into your microphone.");
+
+    var btn = $("conn-pop-btn");
+    btn.textContent = present ? "Engage routing" : "Install VB-CABLE";
+    btn.onclick = function () { S.connOpen = false; renderConnPop(); onInstallRouting(); };
   }
 
   // InstallRouting (install OR engage as appropriate). Open the matching
@@ -1099,45 +1114,6 @@
   }
 
   // ===========================================================================
-  // SETTINGS (⚙) PREVIEW POPOVER — drive banner state + dialogs (QA aid)
-  // ===========================================================================
-  function renderDemoPop() {
-    show($("demo-pop"), S.demoOpen);
-    if (!S.demoOpen) return;
-
-    var bhost = $("demo-banner");
-    bhost.innerHTML = "";
-    [["absent", "Cable absent"], ["present", "Cable detected"], ["engaged", "Engaged / ready"]].forEach(function (pair) {
-      var cur = (S.snap.routing || {}).state === pair[0];
-      var row = el("div", "row" + (cur ? " active" : ""), esc(pair[1]));
-      row.addEventListener("click", function () {
-        S.snap.routing = { state: pair[0], detail: "", canEngage: pair[0] === "present" };
-        S.demoOpen = false;
-        renderBanner();
-        renderDemoPop();
-      });
-      bhost.appendChild(row);
-    });
-
-    var dhost = $("demo-dialogs");
-    dhost.innerHTML = "";
-    // "First-run consent" is the real gate, not a mock: it opens the same
-    // #consent-overlay boot shows when VB-CABLE is missing, so the flow can be
-    // inspected on a machine that already has the cable installed.
-    [["consent", "First-run consent"],
-     ["progressInstall", "Install progress"], ["error", "Error"],
-     ["engageSuccess", "Engage success"], ["installSuccess", "Install success"]].forEach(function (pair) {
-      var row = el("div", "row", esc(pair[1]));
-      row.addEventListener("click", function () {
-        S.demoOpen = false;
-        renderDemoPop();
-        if (pair[0] === "consent") showConsent(); else openDialog(pair[0]);
-      });
-      dhost.appendChild(row);
-    });
-  }
-
-  // ===========================================================================
   // VIEW SWITCH
   // ===========================================================================
   function setView(view) {
@@ -1154,7 +1130,7 @@
   // ===========================================================================
   function renderAll() {
     applyTheme();
-    renderBanner();
+    renderStatus();
     renderSections();
     renderSidebar();
     renderNowPlaying();
@@ -1190,16 +1166,19 @@
       call("SetTheme", S.theme);
     });
 
-    // Settings (⚙) preview popover.
-    $("demo-toggle").addEventListener("click", function (e) {
+    // Routing status pill. Clickable only when something needs fixing; the popup
+    // it opens carries the install/engage action, which is why the pill must not
+    // be inert in the problem states.
+    $("conn-pill").addEventListener("click", function (e) {
       e.stopPropagation();
-      S.demoOpen = !S.demoOpen;
-      renderDemoPop();
+      if ((S.snap.routing || {}).state === "engaged") return;   // healthy = badge
+      S.connOpen = !S.connOpen;
+      renderConnPop();
     });
     document.addEventListener("click", function () {
-      if (S.demoOpen) { S.demoOpen = false; renderDemoPop(); }
+      if (S.connOpen) { S.connOpen = false; renderConnPop(); }
     });
-    $("demo-pop").addEventListener("click", function (e) { e.stopPropagation(); });
+    $("conn-pop").addEventListener("click", function (e) { e.stopPropagation(); });
 
     // Window controls. The window is frameless, so these HTML buttons ARE the
     // window chrome. Close means quit, matching the titlebar X of any other app
@@ -1378,7 +1357,7 @@
     r.EventsOn("routingStatus", function (status) {
       if (!status) return;
       S.snap.routing = status;
-      renderBanner();
+      renderStatus();
       if (status.state === "engaged") {
         if (S.dialog === "progressInstall") openDialog("installSuccess");
         else if (S.dialog === "progressEngage") openDialog("engageSuccess");

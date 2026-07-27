@@ -35,17 +35,6 @@
           <button id="theme-toggle" class="ibtn no-drag" type="button">
             <span id="theme-icon">☾</span> <span id="theme-label">Dark</span>
           </button>
-          <button id="demo-toggle" class="ibtn icon-only no-drag" type="button" title="Setup state / dialogs (preview)">⚙</button>
-
-          <!-- Settings (⚙) popover: drive the routing-banner state + the dialogs
-               for demonstration/QA, mirroring the comp's preview menu. -->
-          <div id="demo-pop" class="demo-pop no-drag hidden">
-            <div class="hdr">SETUP STATE</div>
-            <div id="demo-banner"></div>
-            <div class="sep"></div>
-            <div class="hdr">DIALOGS</div>
-            <div id="demo-dialogs"></div>
-          </div>
         </div>
 
         <div style="display:flex;gap:4px;margin-left:8px;">
@@ -88,6 +77,11 @@
 
           <!-- Sidebar footer: routing pill + tray/quit. -->
           <div class="sidebar-footer">
+            <div id="conn-pop" class="conn-pop hidden">
+              <div id="conn-pop-title" class="cp-title"></div>
+              <div id="conn-pop-body" class="cp-body"></div>
+              <button id="conn-pop-btn" class="ibtn cp-btn" type="button"></button>
+            </div>
             <div id="conn-pill" class="conn-pill" style="background:var(--warn-bg);">
               <span id="conn-dot" class="conn-dot" style="background:var(--warning);"></span>
               <span id="conn-label" class="conn-label" style="color:var(--warning);">Routing needs setup</span>
@@ -109,8 +103,7 @@
           <!-- -------------------- SOUNDBOARD VIEW -------------------- -->
           <div id="view-sound" class="view">
 
-            <div class="banner-wrap"><div id="banner"></div></div>
-
+  
             <div class="search-row">
               <div class="search-box">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--faint)" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
