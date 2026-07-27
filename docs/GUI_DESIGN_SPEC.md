@@ -220,8 +220,8 @@ The backend surface is six small Go interfaces. Treat these as the **complete ca
 - **Purpose:** Browse the full library, grouped by category, in one vertical scroll.
 - **Slot-in binding:** renders the read-only `catalog.Library` (categories → clips). **No mutation** — pure display + the per-cell actions below.
 - **States to design:**
-  - **Section header** per non-empty, filter-matching category: bold `Pretty Category Name  (N)` where **N is the count of currently-visible (filtered) cells**, not the total. (e.g. `films  (12)`.) A separator follows each section.
-  - **Dense section** (39 tiles, "games") and **sparse section** (2 tiles, "game-clips") must both look right — the grid reflows responsively on resize.
+  - **Section header** per non-empty, filter-matching category: bold `Pretty Category Name  (N)` where **N is the count of currently-visible (filtered) cells**, not the total. (e.g. `Air horns  (12)`.) A separator follows each section.
+  - **Dense section** (~40 tiles) and **sparse section** (2 tiles) must both look right — the grid reflows responsively on resize.
   - **No-results:** when nothing matches, a centered label `No clips match your search.` replaces all sections (favourites hidden too).
 - **Tile sizing today:** cells are a fixed ~168×40 logical px in a reflowing GridWrap. You may propose a different cell size/shape (custom widget) — note it.
 
@@ -353,26 +353,14 @@ The backend surface is six small Go interfaces. Treat these as the **complete ca
 
 **The atom — a Clip:** has an **ID** (`<category>/<basename>`, internal), a display **Name** (filename without extension, with underscores/dashes turned into spaces and trimmed — e.g. `airhorn_loud-v2.mp3` → `airhorn loud v2`), and a **Category** (its folder name). Supported formats: mp3, wav, flac, ogg. There is **no rename/tag/metadata editing** in the UI — Name is display, ID/Category are keys.
 
-**Real content scale (design to these concrete numbers):** **the clip library across 12 categories.** Per-category counts:
+**Real content scale (design to these numbers):** the library is user-supplied, so the grid must
+survive a very wide range. Design against roughly **200 clips across a dozen categories**, with an
+**extreme spread** between sections — assume the largest category holds ~40 tiles and the smallest
+holds 2. Your grid must look intentional at both ends, and all tiles live in **one vertical
+scroll**. Also design the **zero state**: a fresh install ships no audio at all, so an empty
+library is the first thing a new user sees.
 
-| Category | Display label | Clips |
-|---|---|---|
-| games | Games | **39** |
-| movies | Movies | 36 |
-| films | films | 35 |
-| scifi | Scifi | 28 |
-| reactions | Reactions | 14 |
-| wow | Wow | 13 |
-| memes | Memes | 12 |
-| tv | Tv | 12 |
-| game-clips | game-clips | 9 |
-| game-clips | a game | 6 |
-| game-clips | a game | 6 |
-| game-clips | game-clips | **2** |
-
-Note the **extreme spread**: one section has 39 tiles, another has 2. Your grid must look intentional at both ends. All ~200 tiles live in **one vertical scroll**.
-
-**Category ordering & labels:** categories are **alphabetical** (game-clips, games, memes, movies, game-clips, reactions, game-clips, scifi, game-clips, films, tv, wow). The label is the category with dashes/underscores → spaces and the first letter capitalised (so `films` → `films`, `game-clips` → `game-clips`). Within a category, clips are sorted by ID. Each header's count is the **visible/filtered** count, live-updating as the user types.
+**Category ordering & labels:** categories are **alphabetical** by folder name. The label is the category with dashes/underscores → spaces and the first letter capitalised (so `air-horns` → `Air horns`). Within a category, clips are sorted by ID. Each header's count is the **visible/filtered** count, live-updating as the user types.
 
 **Favourites:** an **ordered, pinned** list of clip IDs (saved order, not alphabetical), persisted on exit. Pinned section above all categories; star toggle on every cell; toggling appends.
 
