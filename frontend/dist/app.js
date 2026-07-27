@@ -1,10 +1,7 @@
 /* SoundBoard — Wails frontend application.
  *
- * The authoritative design comp (design/source/"SoundBoard App.dc.html")
- * expresses the UI as a template DSL ({{ }}, <sc-if>, <sc-for>, onClick="{{ }}")
- * driven by support.js — a preview-only runtime that is NOT shipped. This file
- * reimplements the entire comp as real vanilla state + render + event code,
- * wired to the Wails-bound Go App.
+ * Vanilla state + render + event code (no framework, no build step) wired to the
+ * Wails-bound Go App.
  *
  * Architecture:
  *   - boot(): read the full snapshot from App.GetState(), hydrate `state`,
@@ -25,13 +22,9 @@
  * autoSensitivity,attenuationAmount,audioSubsystem} — the Discord Voice & Video
  * parity control set.
  *
- * The grid renders state.clips grouped by category. The wired backend's
- * GetState() returns the REAL catalog (the clip library across 12 categories), so the
- * grid is driven entirely by live data. app.js keeps a placeholder synthesizer
- * (synthClips) as a pure DEFENSIVE fallback for the degraded case where the
- * snapshot carries categories+counts but no clips[] (e.g. opened outside Wails,
- * or a catalog-walk failure leaves an empty library); whenever clips[] is
- * populated — the normal path — the synthesizer is bypassed entirely.
+ * The grid renders state.clips grouped by category, driven entirely by the live
+ * catalog from GetState(). The clip library is user-supplied (see the README):
+ * an empty sounds/ folder renders an empty grid rather than placeholder content.
  */
 
 (function () {
@@ -54,14 +47,19 @@
     return null;
   }
 
-  // --- category chip colours (verbatim from the comp CATS) ------------------
-  var CHIP = {};
-  function chipFor(name) { return CHIP[name] || "#5865f2"; }
-
-  // The comp's per-category word lists — used ONLY to synthesize readable
-  // placeholder clip names in the skeleton build (when GetState returns no
-  // clips). Real clips from the backend always take precedence.
-  var WORDS = {};
+  // --- category chip colours -----------------------------------------------
+  // Categories are whatever top-level folders the user creates under sounds/,
+  // so the palette is derived from the name rather than a fixed lookup table.
+  // Deterministic: the same category always gets the same colour.
+  var PALETTE = [
+    "#e0564b", "#f5a524", "#b06bf0", "#1bbf9c", "#3aa0f0", "#43c46b",
+    "#22d3c0", "#94a3b3", "#f1c40f", "#ee5a6f", "#2f8fd6", "#7c9cf5"
+  ];
+  function chipFor(name) {
+    var s = String(name || ""), h = 0;
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
 
   function pretty(s) { return String(s || "").replace(/[-_]/g, " ").trim(); }
   function capWords(s) { return pretty(s).replace(/\b\w/g, function (c) { return c.toUpperCase(); }); }
@@ -70,12 +68,7 @@
   var FALLBACK = {
     theme: "dark",
     routing: { state: "absent", detail: "VB-CABLE not detected — install it to route audio into Discord.", canEngage: false },
-    categories: [
-      { name: "game-clips", count: 6 }, { name: "games", count: 39 }, { name: "memes", count: 12 },
-      { name: "movies", count: 36 }, { name: "game-clips", count: 2 }, { name: "reactions", count: 14 },
-      { name: "game-clips", count: 9 }, { name: "scifi", count: 28 }, { name: "game-clips", count: 6 },
-      { name: "films", count: 35 }, { name: "tv", count: 12 }, { name: "wow", count: 13 }
-    ],
+    categories: [],
     clips: [], favorites: [],
     volumes: { mic: 1, master: 1, monitor: 1 }, perClip: {},
     audio: {
@@ -119,8 +112,7 @@
   };
 
   // ---------------------------------------------------------------------------
-  // Snapshot ingest. Normalizes the server State into S, synthesizing placeholder
-  // clips when the snapshot has none (skeleton build).
+  // Snapshot ingest. Normalizes the server State into S.
   // ---------------------------------------------------------------------------
   function ingest(snap) {
     S.snap = snap || FALLBACK;
@@ -159,13 +151,11 @@
       duck: !!au.ducking
     };
 
-    // Clips: prefer the real catalog (the normal wired path); only synthesize
-    // from category counts as a defensive fallback when the snapshot carries no
-    // clips[] (degraded/preview path).
+    // Clips come from the real catalog only. The library is user-supplied, so an
+    // empty catalog renders an honest empty grid rather than invented clip names.
     var clips = (sn.clips || []).map(function (c) {
       return { id: c.id, name: c.name || capWords(c.id.split("/").pop()), category: c.category || c.id.split("/")[0], favorite: !!c.favorite };
     });
-    if (!clips.length && S.cats.length) clips = synthClips(S.cats);
     // Reflect favorites onto clips.
     var favSet = {}; S.favorites.forEach(function (id) { favSet[id] = true; });
     clips.forEach(function (c) { c.favorite = !!favSet[c.id]; });
@@ -182,27 +172,6 @@
     return Math.round(gain * 100);
   }
 
-  // Build readable placeholder clips for the skeleton build.
-  function synthClips(cats) {
-    var out = [];
-    cats.forEach(function (c) {
-      var words = WORDS[c.name] || [pretty(c.name)];
-      for (var i = 0; i < c.count; i++) {
-        var base = words[i % words.length];
-        var label = i < words.length ? base : base + " " + (Math.floor(i / words.length) + 1);
-        out.push({ id: c.name + "/" + i, name: capWords(label), category: c.name, favorite: false });
-      }
-    });
-    // A small default favourites set so the pinned section demonstrates (only
-    // when the server provided none and we're in the synthesized skeleton path).
-    if (!S.favorites.length) {
-      var byId = {}; out.forEach(function (c) { byId[c.id] = true; });
-      ["games/3", "movies/1", "films/5", "reactions/2", "wow/0"].forEach(function (id) {
-        if (byId[id]) S.favorites.push(id);
-      });
-    }
-    return out;
-  }
 
   function clipById(id) {
     for (var i = 0; i < S.clips.length; i++) if (S.clips[i].id === id) return S.clips[i];

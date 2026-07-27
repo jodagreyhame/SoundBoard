@@ -14,7 +14,7 @@ build/bin/
 !frontend/dist/**
 
 # Wails packaging scratch (zipped distributables)
-soundboard.zip
+*.zip
 
 # Verification / proof screenshots (transient). All proof shots use the _name.png
 # convention (the design's authoritative comps live under design/, not here).

@@ -40,14 +40,14 @@ html, body {
   --fg: #f2f2f6;
   --dim: #9a9aa7;
   --faint: #67677a;
-  --primary: #5865f2;
+  --primary: #6b5bd6;
   --primary2: #8b5cf6;
   --on-primary: #ffffff;
   --success: #3fbf6f;
   --success-glow: #62ef93;
   --warning: #f5a524;
   --error: #f0484b;
-  --grad: linear-gradient(135deg, #5865f2, #8b5cf6);
+  --grad: linear-gradient(135deg, #6b5bd6, #8b5cf6);
   --ok-bg: rgba(63, 191, 111, .13);
   --warn-bg: rgba(245, 165, 36, .13);
   --err-bg: rgba(240, 72, 75, .13);
