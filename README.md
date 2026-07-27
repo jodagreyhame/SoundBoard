@@ -258,7 +258,7 @@ end-to-end test that asserts no 50 Hz seam).
 ### Build the shipping binary (recommended: the Wails CLI)
 
 ```bash
-CGO_ENABLED=1 wails build
+CGO_ENABLED=1 wails build -trimpath
 #   -> build/bin/soundboard.exe
 ```
 
@@ -270,7 +270,7 @@ a log file (see [Run](#run)).
 ### Build the shipping binary (plain `go build`, no Wails CLI)
 
 ```bash
-CGO_ENABLED=1 go build -ldflags "-H=windowsgui" -o soundboard.exe .
+CGO_ENABLED=1 go build -trimpath -ldflags "-H=windowsgui" -o soundboard.exe .
 ```
 
 Functionally equivalent (same entrypoint, same embedded frontend); it just skips the Wails
@@ -284,6 +284,14 @@ CLI's icon/manifest packaging and produces a larger, un-stripped binary.
 > exe's import table does not list `webrtc-apm.dll`; it is loaded at runtime.) On a
 > non-Windows build the APM is unavailable and the mic chain degrades to a clean passthrough +
 > the hard gate — the module still compiles everywhere.
+
+> **Always build with `-trimpath` if you intend to distribute the binary.** Go compiles
+> absolute source paths into the executable for panic tracebacks, so a build without it embeds
+> your own machine's layout — your `GOPATH`, your module cache under your home directory, and
+> the full path to your checkout. On a real build here that was ~1,100 strings containing the
+> builder's username. `-trimpath` reduces them to module-relative paths and costs nothing but
+> slightly less useful stack traces. It is not a Wails or cgo concern; it applies to every Go
+> binary you hand to someone else.
 
 > **Binary size.** The `wails build` production binary is roughly **16 MiB**; the plain
 > `go build` one is roughly **20 MiB** (Wails strips debug symbols in production mode, `go build`

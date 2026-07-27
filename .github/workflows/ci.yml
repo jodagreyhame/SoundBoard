@@ -40,7 +40,7 @@ jobs:
           CGO_ENABLED: 1
 
       - name: go build
-        run: go build ./...
+        run: go build -trimpath ./...
         env:
           CGO_ENABLED: 1
 

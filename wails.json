@@ -14,6 +14,7 @@
     "companyName": "SoundBoard",
     "productName": "SoundBoard",
     "productVersion": "2.0.0",
-    "comments": "Windows 11 soundboard that mixes clips over your live mic via VB-CABLE."
+    "comments": "Windows 11 soundboard that mixes clips over your live mic via VB-CABLE.",
+    "copyright": "Copyright (c) 2026 jodagreyhame. MIT Licence. See THIRD_PARTY_NOTICES.md for bundled components."
   }
 }
