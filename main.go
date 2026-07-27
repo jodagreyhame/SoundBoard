@@ -84,6 +84,17 @@ func main() {
 		// hiding the window behind our back.
 		HideWindowOnClose: false,
 
+		// One instance only. Without this, hiding to the tray and then relaunching
+		// silently stacks processes: each keeps its own engine and tray icon, so
+		// quitting one leaves the others running and the app looks like it refuses to
+		// exit. A second launch raises the existing window instead.
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "soundboard-e3f1c0a2-9b47-4d18-8e55-2a6c1f0b7d94",
+			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
+				app.showFromTray()
+			},
+		},
+
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
