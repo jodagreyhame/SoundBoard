@@ -56,8 +56,8 @@ jobs:
       - name: Build shipping binary and assert it is not the Wails stub
         shell: bash
         run: |
-          go build -trimpath -tags desktop,production -ldflags "-H=windowsgui -s -w" -o soundboard.exe .
-          if strings -a soundboard.exe | grep -q "will not build without the correct build tags"; then
+          go build -trimpath -tags desktop,production -ldflags "-H=windowsgui -s -w" -o build/bin/soundboard.exe .
+          if strings -a build/bin/soundboard.exe | grep -q "will not build without the correct build tags"; then
             echo "::error::Binary contains the Wails stub CreateApp — build tags are missing."
             exit 1
           fi

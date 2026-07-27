@@ -1,5 +1,5 @@
-# Binaries
-soundboard.exe
+# Binaries. The only build output is build/bin/soundboard.exe (see README Build);
+# *.exe covers it plus any stray local build.
 *.exe
 
 # Go

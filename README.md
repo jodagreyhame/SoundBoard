@@ -270,7 +270,7 @@ a log file (see [Run](#run)).
 ### Build the shipping binary (plain `go build`, no Wails CLI)
 
 ```bash
-CGO_ENABLED=1 go build -trimpath -tags desktop,production -ldflags "-H=windowsgui -s -w" -o soundboard.exe .
+CGO_ENABLED=1 go build -trimpath -tags desktop,production -ldflags "-H=windowsgui -s -w" -o build/bin/soundboard.exe .
 ```
 
 > **`-tags desktop,production` is mandatory, not an optimisation.** Wails guards its real
@@ -283,9 +283,14 @@ CGO_ENABLED=1 go build -trimpath -tags desktop,production -ldflags "-H=windowsgu
 >
 > To check a binary you already have:
 > ```bash
-> strings -a soundboard.exe | grep -c "will not build without the correct build tags"
+> strings -a build/bin/soundboard.exe | grep -c "will not build without the correct build tags"
 > ```
 > `0` is a real build. `1` means you shipped the stub.
+
+Both paths write to the same place — **`build/bin/soundboard.exe` is the only build output
+this project produces.** Keeping one location matters more than it looks: a stale binary left
+somewhere else is indistinguishable from a fresh one, and running the wrong copy is a
+confusing failure to diagnose.
 
 Functionally equivalent to `wails build` (same entrypoint, same embedded frontend); it just
 skips the Wails CLI's icon/manifest packaging. `-s -w` strips the symbol table and DWARF, which
