@@ -275,12 +275,12 @@
       b.className = "banner engaged";
       b.innerHTML =
         '<span class="b-check">✓</span>' +
-        '<span class="b-text">' + esc(r.detail || "Audio routing active — Discord hears the soundboard. No Discord changes needed.") + "</span>";
+        '<span class="b-text">' + esc(r.detail || "Default mic points at CABLE Output.") + "</span>";
     } else {
       b.className = "banner warn";
       var present = r.state === "present";
       var text = r.detail || (present
-        ? "VB-CABLE detected — engage it so Discord can hear the board."
+        ? "VB-CABLE found — engage routing to point your default mic at it."
         : "VB-CABLE not detected — install it to route audio into Discord.");
       var label = present ? "Engage routing" : "Install / Fix audio routing";
       b.innerHTML =
@@ -299,7 +299,7 @@
     dot.style.background = engaged ? "var(--success)" : "var(--warning)";
     dot.style.boxShadow = engaged ? "0 0 8px var(--success)" : "none";
     lab.style.color = engaged ? "var(--success)" : "var(--warning)";
-    lab.textContent = engaged ? "Routing active" : "Routing needs setup";
+    lab.textContent = engaged ? "Mic → CABLE Output" : "Routing needs setup";
   }
 
   // InstallRouting (install OR engage as appropriate). Open the matching
@@ -899,11 +899,19 @@
     if (sel) sel.value = S.subsystem;
   }
 
+  // Settings the USER must change inside Discord. This app cannot read Discord's
+  // voice settings — they are not exposed in any file it can inspect — so these
+  // are instructions, never verified state. Rendered with a neutral marker
+  // rather than a tick for exactly that reason: a green check would claim a
+  // verification that never happened.
   var CHECKLIST = [
-    "Set Discord input to “CABLE Output”",
-    "Turn OFF Krisp noise suppression",
-    "Turn OFF echo cancellation & AGC",
-    "Turn OFF automatic input sensitivity"
+    "Input Device → “CABLE Output (VB-Audio Virtual Cable)”",
+    "Noise Suppression → None (Krisp strips sound effects)",
+    "Echo Cancellation → off",
+    "Automatic Gain Control → off",
+    "Automatically Adjust Input Sensitivity → off",
+    "Advanced Voice Activity → off",
+    "Bypass System Audio Input Processing → off"
   ];
   function renderChecklist() {
     var host = $("check-grid");
@@ -911,7 +919,7 @@
     CHECKLIST.forEach(function (text) {
       var item = el("div", "check-item");
       item.innerHTML =
-        '<span class="tick"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>' +
+        '<span class="tick"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--dim)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></span>' +
         esc(text);
       host.appendChild(item);
     });

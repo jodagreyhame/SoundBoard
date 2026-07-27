@@ -298,18 +298,34 @@ type routingController struct {
 func (r *routingController) snapshot() RoutingStatus {
 	r.mu.Lock()
 	engaged := r.engaged
+	// A non-nil restore closure means THIS session changed the default mic; nil
+	// means it was already pointing at the cable and we left it alone.
+	changedByUs := r.restore != nil
 	st := r.status
 	r.mu.Unlock()
 
+	// These strings describe only what this process did or can observe locally.
+	//
+	// They deliberately say NOTHING about whether Discord hears the soundboard.
+	// The only fact available here is which device Windows has as the DEFAULT
+	// recording device. Discord keeps its own input-device selection, which may
+	// be pinned to a specific microphone rather than following the default, and
+	// its noise-suppression / gain settings are not readable from outside the
+	// app. Inferring "Discord hears the soundboard" from the default device was
+	// wrong in both directions: it claimed success for a state it could not see,
+	// and it told users no Discord changes were needed when several are (see the
+	// checklist in the Mic & Audio view).
 	switch {
+	case engaged && changedByUs:
+		return RoutingStatus{State: "engaged", Detail: "Default mic set to CABLE Output for this session — restored when you quit.", CanEngage: st.CanEngage}
 	case engaged:
-		return RoutingStatus{State: "engaged", Detail: "Discord hears the soundboard — no Discord changes needed.", CanEngage: st.CanEngage}
+		return RoutingStatus{State: "engaged", Detail: "CABLE Output is already your default mic — left as it is.", CanEngage: st.CanEngage}
 	case st.CanEngage:
-		return RoutingStatus{State: "present", Detail: "VB-CABLE detected — click Engage routing.", CanEngage: true}
+		return RoutingStatus{State: "present", Detail: "VB-CABLE found — engage routing to point your default mic at it.", CanEngage: true}
 	case st.CableInputPresent:
 		return RoutingStatus{State: "present", Detail: "VB-CABLE Input found, but CABLE Output is missing.", CanEngage: false}
 	default:
-		return RoutingStatus{State: "absent", Detail: "VB-CABLE not detected — install it to route audio into Discord.", CanEngage: false}
+		return RoutingStatus{State: "absent", Detail: "VB-CABLE not detected — install it to route the soundboard into your mic.", CanEngage: false}
 	}
 }
 
