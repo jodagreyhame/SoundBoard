@@ -10,7 +10,7 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/wailsapp/wails/v2 v2.11.0
 	golang.design/x/hotkey v0.6.1
-	golang.org/x/sys v0.30.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
