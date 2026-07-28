@@ -34,8 +34,8 @@ import (
 	"sync"
 	"time"
 
-	"soundboard/internal/apm"
-	"soundboard/internal/denoise"
+	"github.com/jodagreyhame/SoundBoard/internal/apm"
+	"github.com/jodagreyhame/SoundBoard/internal/denoise"
 )
 
 const (

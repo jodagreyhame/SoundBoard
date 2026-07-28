@@ -2,7 +2,7 @@
 
 package denoise
 
-import "soundboard/internal/denoise/crnnoise"
+import "github.com/jodagreyhame/SoundBoard/internal/denoise/crnnoise"
 
 // rnnoiseAvailable is true in cgo builds: the vendored RNNoise C library is
 // linked in, so a real denoiser can be constructed. The !cgo build sets this

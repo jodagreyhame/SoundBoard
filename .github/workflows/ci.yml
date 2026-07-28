@@ -74,6 +74,15 @@ jobs:
   secret-scan:
     name: Secret scan
     runs-on: ubuntu-latest
+    # In pull_request context gitleaks-action enumerates the PR's commits via
+    # GET /repos/{owner}/{repo}/pulls/{n}/commits, which the workflow-level
+    # `contents: read` does not cover. Without this the job errors out on every
+    # PR while still passing on push to main, which reads as a failing secret
+    # scan when nothing was ever scanned. Scoped to this job so the build keeps
+    # the narrower default.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:

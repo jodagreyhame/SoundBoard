@@ -5,7 +5,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"soundboard/internal/catalog"
+	"github.com/jodagreyhame/SoundBoard/internal/catalog"
 )
 
 // f32bytes reinterprets a []float32 as the []byte buffer miniaudio would hand a

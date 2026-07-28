@@ -3,7 +3,7 @@
 package wizard
 
 import (
-	"soundboard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/devices"
 )
 
 // Status reports which VB-CABLE endpoints are present.

@@ -3,7 +3,7 @@ package audio
 import (
 	"testing"
 
-	"soundboard/internal/apm"
+	"github.com/jodagreyhame/SoundBoard/internal/apm"
 )
 
 // TestSetNoiseSuppressionTierMapping pins the config-string -> tier encoding,
