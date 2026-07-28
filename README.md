@@ -72,11 +72,15 @@ a Windows restart before the new device appears.
 ### 3. Add clips
 
 ```
-sounds/<category>/<clip>.wav
+Documents\SoundBoard\<category>\<clip>.wav
 ```
 
-Each folder becomes a category in the grid. Drop in `.wav`, `.mp3`, `.flac` or `.ogg`, relaunch,
-and they appear. Two optional helpers are included — see [Bring your own clips](#bring-your-own-clips).
+SoundBoard creates that folder on first run and tells you where it is; **Open folder** takes you
+straight there. Each subfolder becomes a category in the grid. Drop in `.wav`, `.mp3`, `.flac` or
+`.ogg` and press **Reload** — no relaunch needed. Two optional helpers are included — see
+[Bring your own clips](#bring-your-own-clips).
+
+Want them somewhere else? **Change…** points SoundBoard at any folder you like and remembers it.
 
 ### 4. Point your voice app at the cable
 
@@ -237,19 +241,21 @@ has no way to verify it.
 licensing of whatever you put in it.
 
 ```
-sounds/
-├── memes/
+Documents\SoundBoard\
+├── memes\
 │   ├── air_horn.wav
 │   └── sad_trombone.wav
-└── reactions/
+└── reactions\
     └── applause.wav
 ```
 
 - Each top-level folder becomes a **category**; each file becomes a **clip**.
 - Display name = filename with `_`/`-` turned into spaces, extension stripped.
 - Supported: **`.wav`, `.mp3`, `.flac`, `.ogg`**.
-- Drop files in and **relaunch** — no rebuild.
-- `sounds/` sits next to the executable, and is created on first launch if missing.
+- Drop files in and press **Reload** — no relaunch, no rebuild.
+- Files sitting loose in the clip folder are **not** loaded; they must be inside a category folder.
+- The folder lives in your **Documents**, not beside the executable, so moving or reinstalling the
+  app never orphans your library. It is created on first run, and **Change…** repoints it anywhere.
 
 ### Optional helpers
 

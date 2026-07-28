@@ -67,6 +67,7 @@
 
   // --- live UI state (not all of it is persisted server-side) --------------
   var FALLBACK = {
+    version: "",
     theme: "dark",
     routing: { state: "absent", detail: "VB-CABLE not detected — install it to route the soundboard into your mic.", canEngage: false },
     categories: [],
@@ -83,6 +84,7 @@
 
   var S = {
     snap: FALLBACK,           // last server snapshot
+    version: "",              // app version, from the Go snapshot
     view: "sound",            // 'sound' | 'audio'
     theme: "dark",
     search: "",
@@ -119,6 +121,9 @@
   function ingest(snap) {
     S.snap = snap || FALLBACK;
     var sn = S.snap;
+    // Version comes from the Go side so the title-bar badge always matches the
+    // running binary; it used to be hard-coded in index.html and went stale.
+    S.version = sn.version || "";
     S.theme = sn.theme === "light" ? "light" : "dark";
     S.cats = (sn.categories || []).slice();
     S.favorites = (sn.favorites || []).slice();
@@ -1177,8 +1182,18 @@
     $("clipfolder-dismiss").classList.toggle("hidden", bad);
   }
 
+  function renderVersion() {
+    var el = $("brand-badge");
+    if (!el) return;
+    // Hidden rather than showing a bare "v" when the version is unknown, which
+    // happens only outside the Wails runtime.
+    el.textContent = S.version ? "v" + S.version : "";
+    el.classList.toggle("hidden", !S.version);
+  }
+
   function renderAll() {
     applyTheme();
+    renderVersion();
     renderStatus();
     renderClipFolder();
     renderSections();

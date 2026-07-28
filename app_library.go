@@ -17,6 +17,14 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// appVersion is the single runtime source of the app's version, surfaced to the
+// UI through GetState so the badge in the title bar cannot drift from the
+// binary the way a hard-coded "v2" in index.html did.
+//
+// Keep it in step with productVersion in wails.json, which feeds the Windows
+// version resource, and with the release tag.
+const appVersion = "1.0.0"
+
 // ClipFolderInfo is the front end's view of where clips live.
 type ClipFolderInfo struct {
 	Path       string   `json:"path"`
