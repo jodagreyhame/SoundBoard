@@ -28,8 +28,8 @@ the same time**. Your voice is not muted or replaced while a clip plays.
   for a stronger suppression tier and speech-probability voice detection.
 - **Hear what others hear.** A confidence monitor plays back the exact signal being sent down the
   cable, so you can check your own noise suppression and gate before anyone else has to.
-- **Bring your own clips.** No audio ships with SoundBoard. Drop files into a folder, relaunch,
-  done — no rebuild, no import step, no library format.
+- **Bring your own clips.** No audio ships with SoundBoard. Drop files into a folder in your
+  Documents, press Reload, done — no rebuild, no import step, no library format.
 - **Global hotkeys and a tray icon.** Push-to-talk, fire clips without focusing the window, keep
   it running in the background.
 - **One self-contained executable.** ~16 MB. No loose DLLs, no runtime to install.
@@ -280,7 +280,7 @@ scripts/fetch_freesound.sh reactions "applause"
 scripts/fetch_freesound.sh games "8-bit coin" -n 5 --license cc0
 ```
 
-Every fetched clip is recorded in `sounds/<category>/ATTRIBUTION.md` with its ID, author, licence
+Every fetched clip is recorded in `<clip folder>/<category>/ATTRIBUTION.md` with its ID, author, licence
 and source URL. **CC-BY audio requires crediting the author if you redistribute it** — keep that
 file with the audio. `--license cc0` restricts results to public-domain clips.
 
@@ -355,7 +355,7 @@ soundboard/
 │   ├── audio/               # real-time duplex mixer, DSP worker, SPSC rings, gate, ducking
 │   ├── apm/                 # WebRTC AudioProcessingModule (embedded DLL, runtime-loaded)
 │   ├── denoise/             # RNNoise (vendored Xiph C sources, cgo)
-│   ├── catalog/             # walks sounds/, lazy decode + resample to 48k/2ch/f32
+│   ├── catalog/             # walks the clip folder, lazy decode + resample to 48k/2ch/f32
 │   ├── config/              # JSON settings + log path
 │   ├── devices/             # WASAPI enumeration, VB-CABLE detection
 │   ├── hotkeys/             # global hotkeys + push-to-talk

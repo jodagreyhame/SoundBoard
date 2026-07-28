@@ -25,7 +25,7 @@
  *
  * The grid renders state.clips grouped by category, driven entirely by the live
  * catalog from GetState(). The clip library is user-supplied (see the README):
- * an empty sounds/ folder renders an empty grid rather than placeholder content.
+ * an empty clip folder renders an empty grid rather than placeholder content.
  */
 
 (function () {
@@ -49,7 +49,7 @@
   }
 
   // --- category chip colours -----------------------------------------------
-  // Categories are whatever top-level folders the user creates under sounds/,
+  // Categories are whatever top-level folders the user creates in the clip folder,
   // so the palette is derived from the name rather than a fixed lookup table.
   // Deterministic: the same category always gets the same colour.
   var PALETTE = [

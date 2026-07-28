@@ -69,8 +69,11 @@ case "$CATEGORY" in
   *[/\\]*|.|..|"") die "invalid category: '$CATEGORY'";;
 esac
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="$ROOT/sounds/$CATEGORY"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/clip_dir.sh
+. "$SCRIPT_DIR/clip_dir.sh"
+CLIP_DIR="$(soundboard_clip_dir)"
+DEST="$CLIP_DIR/$CATEGORY"
 
 # snake_case a display name: strip extension, lower, non-alnum -> _, squeeze, trim.
 slug() {
@@ -138,7 +141,7 @@ echo
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "Dry run: $ok would be imported, $skipped skipped."
 else
-  echo "Imported $ok into sounds/$CATEGORY/ ($skipped skipped, $failed failed)."
+  echo "Imported $ok into $CATEGORY/ ($skipped skipped, $failed failed)."
   echo "Restart SoundBoard to pick up new clips."
 fi
 
