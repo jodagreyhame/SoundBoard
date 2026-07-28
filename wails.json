@@ -13,7 +13,7 @@
   "info": {
     "companyName": "jodagreyhame",
     "productName": "SoundBoard",
-    "productVersion": "2.0.0",
+    "productVersion": "1.0.0",
     "comments": "Windows soundboard that mixes clips over your live microphone via VB-CABLE, so any voice app hears them.",
     "copyright": "Copyright (c) 2026 jodagreyhame. MIT Licence. See THIRD_PARTY_NOTICES.md for bundled components."
   }
