@@ -1128,9 +1128,59 @@
   // ===========================================================================
   // FULL RENDER
   // ===========================================================================
+  // --- clip folder ----------------------------------------------------------
+  // Where the clips live. Kept beside the snapshot rather than inside it: the
+  // grid re-renders constantly, while this changes only when the user reloads
+  // or repoints the folder.
+  var CF = { path: "", isDefault: true, error: "", categories: 0, clips: 0, warnings: [], noticeSeen: true };
+  var cfDismissed = false;
+
+  function refreshClipFolder() {
+    var p = call("ClipFolder");
+    if (p && p.then) {
+      p.then(function (info) { if (info) { CF = info; renderClipFolder(); } })
+       .catch(function () {});
+    }
+  }
+
+  // Re-pull the whole snapshot. The grid is rendered from GetState, so one
+  // signal repaints everything; there is no incremental path to keep in step.
+  function reingest() {
+    var p = call("GetState");
+    if (p && p.then) {
+      return p.then(function (snap) { if (snap) { ingest(snap); renderAll(); } })
+              .catch(function () {});
+    }
+    return null;
+  }
+
+  function renderClipFolder() {
+    var box = $("clipfolder-notice");
+    if (!box) return;
+
+    var bad = !!CF.error;
+    // Shown while something is wrong, and on first run until acknowledged. An
+    // empty grid with no explanation is the failure this whole feature exists
+    // to remove, so the error case is NOT dismissable.
+    var show = bad || (!CF.noticeSeen && !cfDismissed);
+    box.classList.toggle("hidden", !show);
+    if (!show) return;
+
+    box.classList.toggle("clipfolder-bad", bad);
+    $("clipfolder-title").textContent = bad ? "Problem with your clip folder" : "Your clips live here";
+    $("clipfolder-path").textContent = CF.path || "(no folder resolved)";
+
+    var err = $("clipfolder-error");
+    err.textContent = CF.error || "";
+    err.classList.toggle("hidden", !bad);
+
+    $("clipfolder-dismiss").classList.toggle("hidden", bad);
+  }
+
   function renderAll() {
     applyTheme();
     renderStatus();
+    renderClipFolder();
     renderSections();
     renderSidebar();
     renderNowPlaying();
@@ -1156,7 +1206,52 @@
   // ===========================================================================
   // WIRING
   // ===========================================================================
+  function wireClipFolder() {
+    var reload = $("reload-library");
+    if (reload) {
+      reload.addEventListener("click", function () {
+        var label = $("reload-label");
+        label.textContent = "Reloading…";
+        reload.disabled = true;
+        var done = function () { label.textContent = "Reload"; reload.disabled = false; renderClipFolder(); };
+
+        var p = call("ReloadLibrary");
+        if (!p || !p.then) { done(); return; }
+        p.then(function (info) { if (info) CF = info; return reingest(); })
+         .then(done)
+         .catch(function (e) { CF.error = String((e && e.message) || e); done(); });
+      });
+    }
+
+    var change = $("clipfolder-change");
+    if (change) {
+      change.addEventListener("click", function () {
+        var p = call("ChooseClipFolder");
+        if (!p || !p.then) return;
+        p.then(function (info) { if (info) CF = info; return reingest(); })
+         .then(function () { renderClipFolder(); })
+         .catch(function (e) { CF.error = String((e && e.message) || e); renderClipFolder(); });
+      });
+    }
+
+    var open = $("clipfolder-open");
+    if (open) open.addEventListener("click", function () { call("OpenClipFolder"); });
+
+    var dismiss = $("clipfolder-dismiss");
+    if (dismiss) {
+      dismiss.addEventListener("click", function () {
+        // Hide immediately rather than waiting on the round trip; the Go side
+        // only persists that it was seen.
+        cfDismissed = true;
+        CF.noticeSeen = true;
+        call("DismissClipFolderNotice");
+        renderClipFolder();
+      });
+    }
+  }
+
   function wire() {
+    wireClipFolder();
     $("nav-sound").addEventListener("click", function () { setView("sound"); });
     $("nav-audio").addEventListener("click", function () { setView("audio"); });
 
@@ -1367,6 +1462,14 @@
     // nowPlaying: {clips:[clipID]} — the FULL set the engine is still playing,
     // emitted only when it changes. Reconcile the chip row against it so a chip
     // disappears by itself the moment its clip ends.
+    // The clip library was reloaded or repointed. Re-pull the snapshot rather
+    // than patching the grid, so the tiles can never disagree with what the
+    // engine will actually play.
+    r.EventsOn("libraryChanged", function () {
+      reingest();
+      refreshClipFolder();
+    });
+
     r.EventsOn("nowPlaying", function (p) {
       reconcileNowPlaying(p && p.clips ? p.clips : []);
     });
@@ -1396,6 +1499,9 @@
   // blocking modal on someone mid-session.
   function finishBoot() {
     renderAll();
+    // Asynchronous so a slow or failing folder lookup cannot delay first paint;
+    // the notice appears a moment later if there is anything to say.
+    refreshClipFolder();
     if (consentNeeded()) showConsent();
   }
 

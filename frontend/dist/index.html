@@ -110,10 +110,35 @@
                 <input id="search" type="text" placeholder="Search clips by name or category…" autocomplete="off" spellcheck="false">
                 <span id="search-clear" class="clear hidden">✕</span>
               </div>
+              <button id="reload-library" class="stop-btn" type="button" title="Re-scan the clip folder for new or changed files">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+                <span id="reload-label">Reload</span>
+              </button>
               <button id="stop-all" class="stop-btn" type="button">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
                 <span id="stop-label">Stop</span>
               </button>
+            </div>
+
+            <!-- Where the clips live. Shown on first run (until dismissed) and
+                 whenever resolving or scanning the folder failed, because an
+                 empty grid with no explanation is the exact failure this
+                 replaced. -->
+            <div id="clipfolder-notice" class="clipfolder hidden">
+              <div class="clipfolder-body">
+                <span id="clipfolder-title" class="clipfolder-title">Your clips live here</span>
+                <code id="clipfolder-path" class="clipfolder-path"></code>
+                <span id="clipfolder-hint" class="clipfolder-hint">
+                  Put audio files in folders inside it — each folder becomes a category, like
+                  <code>SoundBoard\memes\airhorn.wav</code>. Then press Reload.
+                </span>
+                <span id="clipfolder-error" class="clipfolder-error hidden"></span>
+              </div>
+              <div class="clipfolder-actions">
+                <button id="clipfolder-open" class="clipfolder-btn" type="button">Open folder</button>
+                <button id="clipfolder-change" class="clipfolder-btn" type="button">Change…</button>
+                <button id="clipfolder-dismiss" class="clipfolder-btn clipfolder-btn-ghost" type="button">Got it</button>
+              </div>
             </div>
 
             <div id="nowplaying" class="nowplaying hidden">
