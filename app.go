@@ -18,7 +18,7 @@ import (
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
-	"soundboard/internal/config"
+	"github.com/jodagreyhame/SoundBoard/internal/config"
 )
 
 // App is the Wails application object. ctx is captured in OnStartup (via

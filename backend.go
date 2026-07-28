@@ -24,14 +24,14 @@ import (
 
 	"github.com/gen2brain/malgo"
 
-	"soundboard/internal/apm"
-	"soundboard/internal/audio"
-	"soundboard/internal/catalog"
-	"soundboard/internal/config"
-	"soundboard/internal/devices"
-	"soundboard/internal/hotkeys"
-	"soundboard/internal/setup"
-	"soundboard/internal/winaudio"
+	"github.com/jodagreyhame/SoundBoard/internal/apm"
+	"github.com/jodagreyhame/SoundBoard/internal/audio"
+	"github.com/jodagreyhame/SoundBoard/internal/catalog"
+	"github.com/jodagreyhame/SoundBoard/internal/config"
+	"github.com/jodagreyhame/SoundBoard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/hotkeys"
+	"github.com/jodagreyhame/SoundBoard/internal/setup"
+	"github.com/jodagreyhame/SoundBoard/internal/winaudio"
 )
 
 // Backend bundles the live backend objects the bound App methods drive. It is
