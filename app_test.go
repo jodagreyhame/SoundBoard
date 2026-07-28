@@ -47,10 +47,10 @@ func newAppWithBackend(b *Backend) *App {
 // theme defaulting to dark, and routing reported absent.
 func TestGetStateAssemblesFromCatalog(t *testing.T) {
 	fsys := fstest.MapFS{
-		"sounds/memes/airhorn.wav":      {Data: []byte("x")},
-		"sounds/memes/sad-trombone.mp3": {Data: []byte("x")},
-		"sounds/games/level_up.ogg":     {Data: []byte("x")},
-		"sounds/games/.keep":            {Data: []byte("")},
+		"memes/airhorn.wav":      {Data: []byte("x")},
+		"memes/sad-trombone.mp3": {Data: []byte("x")},
+		"games/level_up.ogg":     {Data: []byte("x")},
+		"games/.keep":            {Data: []byte("")},
 	}
 	s := &config.Settings{
 		Favorites: []string{"memes/airhorn"},
@@ -149,7 +149,7 @@ func TestGetStateAssemblesFromCatalog(t *testing.T) {
 // TestGetStateEmptyLibrary verifies an EMPTY catalog yields non-nil empty slices
 // /maps (never JSON null), so the frontend can iterate without guards.
 func TestGetStateEmptyLibrary(t *testing.T) {
-	fsys := fstest.MapFS{"sounds/.keep": {Data: []byte("")}}
+	fsys := fstest.MapFS{".keep": {Data: []byte("")}}
 	app := newAppWithBackend(fakeBackend(t, fsys, &config.Settings{}))
 
 	st := app.GetState()

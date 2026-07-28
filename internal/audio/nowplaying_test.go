@@ -29,8 +29,8 @@ func pumpDuplex(e *Engine, n int) {
 func newTwoClipEngine(t *testing.T) (e *Engine, idA, idB string) {
 	t.Helper()
 	lib, err := catalog.New(fstest.MapFS{
-		"sounds/test/a.wav": {Data: []byte("not decoded in this test")},
-		"sounds/test/b.wav": {Data: []byte("not decoded in this test")},
+		"test/a.wav": {Data: []byte("not decoded in this test")},
+		"test/b.wav": {Data: []byte("not decoded in this test")},
 	})
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)

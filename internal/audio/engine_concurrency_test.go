@@ -15,7 +15,7 @@ import (
 func newTestEngine(t *testing.T) (*Engine, string) {
 	t.Helper()
 	lib, err := catalog.New(fstest.MapFS{
-		"sounds/test/clip.wav": {Data: []byte("not decoded in this test")},
+		"test/clip.wav": {Data: []byte("not decoded in this test")},
 	})
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)

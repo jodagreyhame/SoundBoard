@@ -6,10 +6,12 @@
 package catalog
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"path"
 	"sort"
 	"strings"
@@ -69,10 +71,29 @@ var supported = map[string]bool{
 	".ogg":  true,
 }
 
-// New walks the "sounds/<category>/<file>.<ext>" tree in fsys, builds the
+// Empty returns a valid, empty Library.
+//
+// Used when the clip folder cannot be read at all, so the app starts with an
+// explained empty grid instead of crashing. It carries no clips, so the nil
+// fsys is never dereferenced — decodeClip is only reachable through a Clip.
+func Empty() *Library {
+	return &Library{byID: make(map[string]*Clip)}
+}
+
+// New walks the "<category>/<file>.<ext>" tree at the root of fsys, builds the
 // category/clip structure, and indexes clips by ID. It does NOT decode audio;
 // call Load for that. Files named ".keep" and dotfiles are skipped.
+//
+// fsys is rooted at the clip folder itself, so callers pass
+// os.DirFS(clipFolder) and categories are its immediate subdirectories.
 func New(fsys fs.FS) (*Library, error) {
+	return NewContext(context.Background(), fsys)
+}
+
+// NewContext is New with cancellation. The context is checked between entries,
+// which bounds a scan of an unexpectedly large tree; it cannot interrupt a
+// single blocking directory read on an unresponsive network share.
+func NewContext(ctx context.Context, fsys fs.FS) (*Library, error) {
 	l := &Library{
 		byID: make(map[string]*Clip),
 		fsys: fsys,
@@ -81,14 +102,60 @@ func New(fsys fs.FS) (*Library, error) {
 	// Collect clips per category name so we can build ordered Category structs.
 	byCat := make(map[string][]*Clip)
 
-	err := fs.WalkDir(fsys, "sounds", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	// Diagnostics gathered during the walk. A user pointing the app at their own
+	// folder hits cases a curated app-owned directory never did, and every one of
+	// them used to fail silently.
+	var rootAudioFiles int
+
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
-		if d.IsDir() {
+		if err != nil {
+			// One unreadable entry must not destroy the whole library. A
+			// user-chosen folder produces these routinely: OneDrive cloud-only
+			// placeholders, an ACL'd subfolder, an antivirus lock, a directory
+			// deleted mid-reorganisation, a transient network blip. Log it and
+			// carry on; only a failure to open the root aborts the walk.
+			if p == "." {
+				return err
+			}
+			log.Printf("catalog: skipping %q: %v", p, err)
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
 			return nil
 		}
+
+		depth := 0
+		if p != "." {
+			depth = strings.Count(p, "/") + 1
+		}
+
+		if d.IsDir() {
+			if p == "." {
+				return nil
+			}
+			// Prune before descending: dot-directories are not categories, and
+			// nothing below a category is indexable. Without this the walk
+			// recurses the entire subtree of whatever folder the user picked -
+			// a real Documents folder is thousands of entries.
+			if strings.HasPrefix(d.Name(), ".") || depth >= 2 {
+				return fs.SkipDir
+			}
+			return nil
+		}
+
 		name := d.Name()
+
+		// A junction or symlink reports as neither a directory nor a regular
+		// file, so WalkDir will not descend it and the extension check below
+		// would drop it without a word. Say so instead.
+		if depth == 1 && d.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			log.Printf("catalog: skipping %q: junctions and symlinks are not followed; point SoundBoard at the real folder or copy the files in", p)
+			return nil
+		}
+
 		// Skip .keep markers and any dotfile.
 		if strings.HasPrefix(name, ".") {
 			return nil
@@ -97,18 +164,18 @@ func New(fsys fs.FS) (*Library, error) {
 		if !supported[ext] {
 			return nil
 		}
-		// Expect exactly sounds/<category>/<file>. Anything shallower or
-		// deeper than that is ignored.
-		rel := strings.TrimPrefix(p, "sounds/")
-		parts := strings.Split(rel, "/")
+
+		// Expect exactly <category>/<file>. Anything shallower or deeper is
+		// ignored; depth 1 means the user dropped clips straight into the clip
+		// folder, which is the single most likely first-run mistake.
+		parts := strings.Split(p, "/")
 		if len(parts) != 2 {
+			if len(parts) == 1 {
+				rootAudioFiles++
+			}
 			return nil
 		}
 		category := parts[0]
-		// Skip clips under a hidden/dot category directory.
-		if strings.HasPrefix(category, ".") {
-			return nil
-		}
 		base := strings.TrimSuffix(name, path.Ext(name))
 
 		clip := &Clip{
@@ -117,12 +184,22 @@ func New(fsys fs.FS) (*Library, error) {
 			Category: category,
 			Path:     p,
 		}
+		if prev, dup := l.byID[clip.ID]; dup {
+			// IDs drop the extension, so "airhorn.wav" and "airhorn.mp3" in one
+			// category collide. byCat keeps both (two tiles) while byID keeps
+			// the last, so one tile fires the other's audio.
+			log.Printf("catalog: %q and %q share the id %q; only %q will play - rename one of them", prev.Path, clip.Path, clip.ID, clip.Path)
+		}
 		byCat[category] = append(byCat[category], clip)
 		l.byID[clip.ID] = clip
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("catalog: walk sounds: %w", err)
+		return nil, fmt.Errorf("catalog: walk clip folder: %w", err)
+	}
+
+	if rootAudioFiles > 0 && len(byCat) == 0 {
+		log.Printf("catalog: found %d audio file(s) directly in the clip folder but no category folders; clips must live in <category>/<file>, e.g. memes/airhorn.wav", rootAudioFiles)
 	}
 
 	// Build Categories in stable (sorted) order, clips sorted by name.
@@ -166,11 +243,12 @@ func (l *Library) EnsureDecoded(clip *Clip) ([]float32, error) {
 func (l *Library) Load() error {
 	for _, cat := range l.Categories {
 		for _, clip := range cat.Clips {
-			pcm, err := l.decodeClip(clip)
-			if err != nil {
+			// Via EnsureDecoded rather than decodeClip directly: writing
+			// clip.PCM unlocked here races any concurrent EnsureDecoded, which
+			// holds decMu for exactly this reason.
+			if _, err := l.EnsureDecoded(clip); err != nil {
 				return fmt.Errorf("catalog: load %q: %w", clip.Path, err)
 			}
-			clip.PCM = pcm
 		}
 	}
 	return nil

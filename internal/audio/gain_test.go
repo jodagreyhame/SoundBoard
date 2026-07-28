@@ -94,7 +94,7 @@ func TestNewEngineDefaultsMonitorUnity(t *testing.T) {
 // the per-path soundboard level.
 func TestDuplexAndMonitorGainsAreIndependent(t *testing.T) {
 	lib, err := catalog.New(fstest.MapFS{
-		"sounds/test/clip.wav": {Data: []byte("not decoded")},
+		"test/clip.wav": {Data: []byte("not decoded")},
 	})
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)
@@ -244,7 +244,7 @@ func TestSoundboardTimesClipGainScalesClip(t *testing.T) {
 // independent), so the captured cursor gain is unaffected by the master gain.
 func TestTriggerGainCapturesPerClipOnly(t *testing.T) {
 	lib, err := catalog.New(fstest.MapFS{
-		"sounds/test/clip.wav": {Data: []byte("not decoded")},
+		"test/clip.wav": {Data: []byte("not decoded")},
 	})
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)
@@ -290,7 +290,7 @@ func TestTriggerGainCapturesPerClipOnly(t *testing.T) {
 // still be audible, so the cursor must still be enqueued.
 func TestPerClipZeroDropsTriggerButMasterMuteDoesNot(t *testing.T) {
 	lib, err := catalog.New(fstest.MapFS{
-		"sounds/test/clip.wav": {Data: []byte("not decoded")},
+		"test/clip.wav": {Data: []byte("not decoded")},
 	})
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)

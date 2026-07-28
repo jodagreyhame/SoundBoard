@@ -11,12 +11,12 @@ import (
 // is fully in-memory and hardware-free.
 func TestNewBuildsTree(t *testing.T) {
 	fsys := fstest.MapFS{
-		"sounds/memes/airhorn.wav":      {Data: []byte("ignored-not-decoded")},
-		"sounds/memes/sad-trombone.mp3": {Data: []byte("ignored")},
-		"sounds/games/level_up.ogg":     {Data: []byte("ignored")},
-		"sounds/games/.keep":            {Data: []byte("")},
-		"sounds/games/readme.txt":       {Data: []byte("not audio")},
-		"sounds/.hidden/x.wav":          {Data: []byte("dotfile dir clip still under 2 parts? no")},
+		"memes/airhorn.wav":      {Data: []byte("ignored-not-decoded")},
+		"memes/sad-trombone.mp3": {Data: []byte("ignored")},
+		"games/level_up.ogg":     {Data: []byte("ignored")},
+		"games/.keep":            {Data: []byte("")},
+		"games/readme.txt":       {Data: []byte("not audio")},
+		".hidden/x.wav":          {Data: []byte("dotfile dir clip still under 2 parts? no")},
 	}
 
 	lib, err := New(fsys)
@@ -45,7 +45,7 @@ func TestNewBuildsTree(t *testing.T) {
 	if c == nil {
 		t.Fatal("Get(memes/sad-trombone) = nil")
 	}
-	if c.Category != "memes" || c.Path != "sounds/memes/sad-trombone.mp3" {
+	if c.Category != "memes" || c.Path != "memes/sad-trombone.mp3" {
 		t.Fatalf("clip fields wrong: %+v", c)
 	}
 	if c.Name != "sad trombone" {
@@ -65,7 +65,9 @@ func TestNewBuildsTree(t *testing.T) {
 // non-empty interleaved float32 at 48k/2ch, exercising the resample path
 // (44.1k -> 48k) and the native-48k path.
 func TestLoadDecodesPCM(t *testing.T) {
-	fsys := os.DirFS("testdata")
+	// The clip folder is the root of the FS handed to New, so point at the
+	// directory that directly contains the category folders.
+	fsys := os.DirFS("testdata/sounds")
 
 	lib, err := New(fsys)
 	if err != nil {
@@ -110,8 +112,8 @@ func TestLoadDecodesPCM(t *testing.T) {
 // hotkey config in either form fires the clip.
 func TestGetExtensionFallback(t *testing.T) {
 	fsys := fstest.MapFS{
-		"sounds/memes/airhorn.mp3":  {Data: []byte("ignored")},
-		"sounds/games/level-up.wav": {Data: []byte("ignored")},
+		"memes/airhorn.mp3":  {Data: []byte("ignored")},
+		"games/level-up.wav": {Data: []byte("ignored")},
 	}
 	lib, err := New(fsys)
 	if err != nil {
