@@ -110,6 +110,14 @@
                 <input id="search" type="text" placeholder="Search clips by name or category…" autocomplete="off" spellcheck="false">
                 <span id="search-clear" class="clear hidden">✕</span>
               </div>
+              <!-- Permanent entry point to the clip folder. Open/Change live in
+                   the panel below, which is dismissable, so without this the
+                   only way to repoint the library would disappear for good the
+                   first time someone clicked "Got it". -->
+              <button id="clipfolder-toggle" class="stop-btn" type="button" title="Where your clips are stored">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                <span>Folder</span>
+              </button>
               <button id="reload-library" class="stop-btn" type="button" title="Re-scan the clip folder for new or changed files">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
                 <span id="reload-label">Reload</span>
@@ -133,6 +141,7 @@
                   <code>SoundBoard\memes\airhorn.wav</code>. Then press Reload.
                 </span>
                 <span id="clipfolder-error" class="clipfolder-error hidden"></span>
+                <span id="clipfolder-notice-text" class="clipfolder-notice-text hidden"></span>
               </div>
               <div class="clipfolder-actions">
                 <button id="clipfolder-open" class="clipfolder-btn" type="button">Open folder</button>

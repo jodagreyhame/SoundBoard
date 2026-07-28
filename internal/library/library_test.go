@@ -202,8 +202,10 @@ func TestValidateRejectsConfigDirectory(t *testing.T) {
 		t.Skipf("os.UserConfigDir unavailable: %v", err)
 	}
 	target := filepath.Join(cfg, configAppDir)
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		t.Skipf("cannot create config dir for test: %v", err)
+	// Deliberately NOT created: a unit test has no business writing into the
+	// developer's real user profile. Skip when the app has never run here.
+	if st, err := os.Stat(target); err != nil || !st.IsDir() {
+		t.Skipf("config dir %s does not exist on this machine", target)
 	}
 	if _, err := Validate(target); err == nil {
 		t.Fatal("Validate accepted SoundBoard's own config directory")

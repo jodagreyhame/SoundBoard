@@ -202,3 +202,68 @@ func TestNewRealDirFSRootIsClipFolder(t *testing.T) {
 		t.Fatalf("clip not indexed from the clip-folder root: %+v", lib.Categories)
 	}
 }
+
+// TestNewReportsUnsupportedFormats covers the case that otherwise looks like a
+// bug in the app: a category full of .m4a files indexes to nothing, with no
+// hint that the format is the problem.
+func TestNewReportsUnsupportedFormats(t *testing.T) {
+	logs := captureLog(t)
+
+	lib, err := New(fstest.MapFS{
+		"voices/greeting.m4a": {Data: []byte("x")},
+		"voices/notes.txt":    {Data: []byte("x")},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if len(lib.Categories) != 0 {
+		t.Fatalf("unsupported file was indexed: %+v", lib.Categories)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "unsupported format") {
+		t.Errorf("unsupported audio was skipped silently; logs = %q", out)
+	}
+	if strings.Contains(out, "notes.txt") {
+		t.Errorf("a non-audio file was reported as unsupported audio; logs = %q", out)
+	}
+}
+
+// TestClipOrderIsDeterministicUnderIDCollision pins stable ordering. IDs are not
+// unique once the extension is stripped, so an unstable sort keyed on ID alone
+// shuffles tiles between runs.
+func TestClipOrderIsDeterministicUnderIDCollision(t *testing.T) {
+	build := func() []string {
+		lib, err := New(fstest.MapFS{
+			"memes/airhorn.wav": {Data: []byte("x")},
+			"memes/airhorn.mp3": {Data: []byte("x")},
+			"memes/zzz.wav":     {Data: []byte("x")},
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		var paths []string
+		for _, c := range lib.Categories[0].Clips {
+			paths = append(paths, c.Path)
+		}
+		return paths
+	}
+
+	first := build()
+	for i := 0; i < 8; i++ {
+		if got := build(); !slicesEqual(got, first) {
+			t.Fatalf("clip order varies between runs: %v vs %v", got, first)
+		}
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

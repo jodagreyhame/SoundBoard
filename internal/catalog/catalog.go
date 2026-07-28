@@ -62,6 +62,15 @@ type Library struct {
 	decMu sync.Mutex
 }
 
+// unsupportedAudio lists formats a user plausibly expects to work but that the
+// decoders do not handle. Used only for diagnostics: finding these and saying
+// nothing is how a category ends up rendering empty with no explanation.
+var unsupportedAudio = map[string]bool{
+	".m4a": true, ".aac": true, ".opus": true, ".wma": true,
+	".aiff": true, ".aif": true, ".alac": true, ".mp4": true,
+	".webm": true, ".oga": true, ".mid": true, ".midi": true,
+}
+
 // supported maps a lowercase file extension (with dot) to whether catalog can
 // decode it.
 var supported = map[string]bool{
@@ -106,6 +115,8 @@ func NewContext(ctx context.Context, fsys fs.FS) (*Library, error) {
 	// folder hits cases a curated app-owned directory never did, and every one of
 	// them used to fail silently.
 	var rootAudioFiles int
+	var unsupportedCount int
+	var unsupportedExample string
 
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -162,6 +173,15 @@ func NewContext(ctx context.Context, fsys fs.FS) (*Library, error) {
 		}
 		ext := strings.ToLower(path.Ext(name))
 		if !supported[ext] {
+			// Only count files that look like audio the user probably expected
+			// to work; a stray .txt or cover.jpg is not worth mentioning. An
+			// all-.m4a category otherwise renders empty with no explanation.
+			if unsupportedAudio[ext] {
+				unsupportedCount++
+				if unsupportedExample == "" {
+					unsupportedExample = p
+				}
+			}
 			return nil
 		}
 
@@ -198,6 +218,10 @@ func NewContext(ctx context.Context, fsys fs.FS) (*Library, error) {
 		return nil, fmt.Errorf("catalog: walk clip folder: %w", err)
 	}
 
+	if unsupportedCount > 0 {
+		log.Printf("catalog: skipped %d audio file(s) in an unsupported format (e.g. %q); SoundBoard decodes .wav, .mp3, .flac and .ogg - convert them or they will not appear", unsupportedCount, unsupportedExample)
+	}
+
 	if rootAudioFiles > 0 && len(byCat) == 0 {
 		log.Printf("catalog: found %d audio file(s) directly in the clip folder but no category folders; clips must live in <category>/<file>, e.g. memes/airhorn.wav", rootAudioFiles)
 	}
@@ -210,7 +234,15 @@ func NewContext(ctx context.Context, fsys fs.FS) (*Library, error) {
 	sort.Strings(cats)
 	for _, c := range cats {
 		clips := byCat[c]
-		sort.Slice(clips, func(i, j int) bool { return clips[i].ID < clips[j].ID })
+		// Stable, with Path as the tiebreak: IDs are NOT unique (the extension
+		// is stripped, so airhorn.wav and airhorn.mp3 collide), and an unstable
+		// sort on a non-unique key reorders tiles between runs.
+		sort.SliceStable(clips, func(i, j int) bool {
+			if clips[i].ID != clips[j].ID {
+				return clips[i].ID < clips[j].ID
+			}
+			return clips[i].Path < clips[j].Path
+		})
 		l.Categories = append(l.Categories, Category{Name: c, Clips: clips})
 	}
 	return l, nil

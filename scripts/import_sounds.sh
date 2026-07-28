@@ -4,7 +4,7 @@
 #
 # SoundBoard ships no audio. This takes clips you own (or are otherwise licensed to
 # use), levels them so they all play at a consistent volume, converts them to the
-# format the engine decodes fastest, and files them under sounds/<category>/.
+# format the engine decodes fastest, and files them into <clip folder>/<category>/.
 #
 # It downloads nothing and contacts no website. Where your audio comes from, and
 # whether you may use it, is your call.
@@ -72,7 +72,11 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/clip_dir.sh
 . "$SCRIPT_DIR/clip_dir.sh"
-CLIP_DIR="$(soundboard_clip_dir)"
+command -v soundboard_require_clip_dir >/dev/null 2>&1 || {
+  echo "error: scripts/clip_dir.sh failed to load" >&2; exit 1; }
+# Aborts with an explanation rather than guessing a path and writing
+# clips where SoundBoard will never look for them.
+CLIP_DIR="$(soundboard_require_clip_dir)"
 DEST="$CLIP_DIR/$CATEGORY"
 
 # snake_case a display name: strip extension, lower, non-alnum -> _, squeeze, trim.
@@ -142,7 +146,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   echo "Dry run: $ok would be imported, $skipped skipped."
 else
   echo "Imported $ok into $CATEGORY/ ($skipped skipped, $failed failed)."
-  echo "Restart SoundBoard to pick up new clips."
+  echo "Press Reload in SoundBoard to pick up new clips."
 fi
 
 # Non-zero only if something genuinely broke, so this composes in a pipeline.

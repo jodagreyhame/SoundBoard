@@ -1137,8 +1137,9 @@
   // Where the clips live. Kept beside the snapshot rather than inside it: the
   // grid re-renders constantly, while this changes only when the user reloads
   // or repoints the folder.
-  var CF = { path: "", isDefault: true, error: "", categories: 0, clips: 0, warnings: [], noticeSeen: true };
+  var CF = { path: "", isDefault: true, error: "", notice: "", categories: 0, clips: 0, warnings: [], noticeSeen: true };
   var cfDismissed = false;
+  var cfOpen = false;   // panel forced open from the Folder button
 
   function refreshClipFolder() {
     var p = call("ClipFolder");
@@ -1164,10 +1165,11 @@
     if (!box) return;
 
     var bad = !!CF.error;
-    // Shown while something is wrong, and on first run until acknowledged. An
-    // empty grid with no explanation is the failure this whole feature exists
-    // to remove, so the error case is NOT dismissable.
-    var show = bad || (!CF.noticeSeen && !cfDismissed);
+    // Shown while something is wrong, on first run until acknowledged, and
+    // whenever the user opens it from the Folder button. An empty grid with no
+    // explanation is the failure this feature exists to remove, so the error
+    // case is NOT dismissable.
+    var show = bad || cfOpen || (!CF.noticeSeen && !cfDismissed);
     box.classList.toggle("hidden", !show);
     if (!show) return;
 
@@ -1178,6 +1180,20 @@
     var err = $("clipfolder-error");
     err.textContent = CF.error || "";
     err.classList.toggle("hidden", !bad);
+
+    // A notice is not a failure: the app is working, it just did something the
+    // user should know about (most often falling back to the default folder
+    // because their configured one was unusable).
+    var note = $("clipfolder-notice-text");
+    if (note) {
+      note.textContent = CF.notice || "";
+      note.classList.toggle("hidden", !CF.notice);
+    }
+
+    // The hint describes how to ADD clips; it is noise when the folder itself
+    // is broken.
+    var hint = $("clipfolder-hint");
+    if (hint) hint.classList.toggle("hidden", bad);
 
     $("clipfolder-dismiss").classList.toggle("hidden", bad);
   }
@@ -1245,12 +1261,30 @@
         if (!p || !p.then) return;
         p.then(function (info) { if (info) CF = info; return reingest(); })
          .then(function () { renderClipFolder(); })
-         .catch(function (e) { CF.error = String((e && e.message) || e); renderClipFolder(); });
+         .catch(function (e) {
+           // The CURRENT folder is still healthy - only the attempted change
+           // failed - so report it as a notice rather than turning the panel
+           // red and hiding Dismiss.
+           CF.notice = String((e && e.message) || e);
+           cfOpen = true;
+           renderClipFolder();
+         });
       });
     }
 
     var open = $("clipfolder-open");
     if (open) open.addEventListener("click", function () { call("OpenClipFolder"); });
+
+    var toggle = $("clipfolder-toggle");
+    if (toggle) {
+      toggle.addEventListener("click", function () {
+        cfOpen = !cfOpen;
+        // Re-pull on open so the counts and any warning are current rather than
+        // whatever they were at boot.
+        if (cfOpen) refreshClipFolder();
+        renderClipFolder();
+      });
+    }
 
     var dismiss = $("clipfolder-dismiss");
     if (dismiss) {

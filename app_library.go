@@ -30,6 +30,7 @@ type ClipFolderInfo struct {
 	Path       string   `json:"path"`
 	IsDefault  bool     `json:"isDefault"`
 	Error      string   `json:"error"`
+	Notice     string   `json:"notice"`
 	Categories int      `json:"categories"`
 	Clips      int      `json:"clips"`
 	Warnings   []string `json:"warnings"`
@@ -44,6 +45,7 @@ func (a *App) clipFolderInfo(state clipFolderState, warnings []string) ClipFolde
 		Path:       state.Path,
 		IsDefault:  state.IsDefault,
 		Error:      state.Error,
+		Notice:     state.Notice,
 		Categories: state.Categories,
 		Clips:      state.Clips,
 		Warnings:   warnings,
@@ -127,9 +129,12 @@ func (a *App) ChooseClipFolder() (ClipFolderInfo, error) {
 	// Persisted only now that the scan succeeded, and flushed rather than
 	// debounced: a folder change is not a slider drag, and losing it to a crash
 	// in the next few hundred milliseconds would be baffling.
+	// Persist the path that was actually validated and scanned, NOT one re-read
+	// from the snapshot: the snapshot is shared mutable state, so re-reading it
+	// risks writing a different folder's path than the one just adopted.
 	a.lcMu.Lock()
 	if b.settings != nil {
-		b.settings.ClipFolder = state.Path
+		b.settings.ClipFolder = picked
 	}
 	a.lcMu.Unlock()
 	a.flushPersist()
@@ -144,7 +149,7 @@ func (a *App) OpenClipFolder() error {
 	if b == nil {
 		return errors.New("backend unavailable")
 	}
-	path, _, _ := b.clipFolderState()
+	path, _, _, _ := b.clipFolderState()
 	if path == "" {
 		return errors.New("no clip folder is configured")
 	}

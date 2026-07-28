@@ -904,15 +904,24 @@ func (e *Engine) StopAll() {
 // the live cursors, so the surviving clip's chip correctly stays until it really
 // stops.
 func (e *Engine) StopClip(id string) {
-	lib := e.Library()
-	if lib == nil {
-		return
+	// The registry, not the library, is the authority on what is playing: a
+	// cursor started before a reload keeps running against the OLD library, so
+	// resolving through the current one would fail to stop a clip the user can
+	// still hear. Try the id as given first; only fall back to the library to
+	// canonicalise an extension-suffixed id (e.g. a hotkey bound to
+	// "memes/airhorn.mp3" against the canonical "memes/airhorn").
+	idx, ok := e.registry.lookup(id)
+	if !ok {
+		lib := e.Library()
+		if lib == nil {
+			return
+		}
+		clip := lib.Get(id)
+		if clip == nil {
+			return
+		}
+		idx, ok = e.registry.lookup(clip.ID)
 	}
-	clip := lib.Get(id)
-	if clip == nil {
-		return
-	}
-	idx, ok := e.registry.lookup(clip.ID)
 	if !ok {
 		return
 	}

@@ -31,7 +31,7 @@
 #   -h, --help           this text
 #
 # ATTRIBUTION
-#   Every fetched clip is appended to sounds/<category>/ATTRIBUTION.md with its
+#   Every fetched clip is appended to <clip folder>/<category>/ATTRIBUTION.md with its
 #   Freesound ID, author, licence and URL. CC-BY audio REQUIRES that you credit the
 #   author if you redistribute it. Keep that file with the audio.
 #
@@ -86,7 +86,11 @@ FILTER="${FILTER:+$FILTER }duration:[0 TO $MAX_DUR]"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/clip_dir.sh
 . "$SCRIPT_DIR/clip_dir.sh"
-CLIP_DIR="$(soundboard_clip_dir)"
+command -v soundboard_require_clip_dir >/dev/null 2>&1 || {
+  echo "error: scripts/clip_dir.sh failed to load" >&2; exit 1; }
+# Aborts with an explanation rather than guessing a path and writing
+# clips where SoundBoard will never look for them.
+CLIP_DIR="$(soundboard_require_clip_dir)"
 DEST="$CLIP_DIR/$CATEGORY"
 ATTR="$DEST/ATTRIBUTION.md"
 
@@ -154,7 +158,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 else
   echo "Fetched $ok into $CATEGORY/ ($failed failed)."
   [ "$ok" -gt 0 ] && echo "Attribution recorded in $CATEGORY/ATTRIBUTION.md — keep it with the audio."
-  echo "Restart SoundBoard to pick up new clips."
+  echo "Press Reload in SoundBoard to pick up new clips."
 fi
 
 [ "$failed" -eq 0 ]

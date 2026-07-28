@@ -42,6 +42,14 @@ type Backend struct {
 	setup    *routingController
 	hotkeys  *hotkeys.Manager
 
+	// clipOpMu serializes WHOLE clip-folder operations (reload, relocate). The
+	// read-index-swap-record sequence is not atomic, so two overlapping
+	// operations could otherwise interleave their swaps and their metadata
+	// writes independently, leaving the engine on one library while the
+	// recorded path names another - which the App then persists to config,
+	// making the mismatch survive a restart.
+	clipOpMu sync.Mutex
+
 	// Clip-folder metadata, guarded by libMu. The library ITSELF is not held
 	// here: it lives in the engine, which is the single owner, so a reload
 	// cannot leave the grid rendering clips the engine can no longer play.
@@ -51,6 +59,7 @@ type Backend struct {
 	clipFolder          string
 	clipFolderIsDefault bool
 	clipFolderErr       string
+	clipFolderNotice    string
 
 	ctx *malgo.AllocatedContext // malgo audio context; freed in close
 
