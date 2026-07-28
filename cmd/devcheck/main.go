@@ -20,8 +20,8 @@ import (
 
 	"github.com/gen2brain/malgo"
 
-	"soundboard/internal/devices"
-	"soundboard/internal/wizard"
+	"github.com/jodagreyhame/SoundBoard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/wizard"
 )
 
 func main() {

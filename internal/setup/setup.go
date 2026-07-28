@@ -26,8 +26,8 @@ import (
 	"fmt"
 	"sync"
 
-	"soundboard/internal/devices"
-	"soundboard/internal/winaudio"
+	"github.com/jodagreyhame/SoundBoard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/winaudio"
 )
 
 // primaryDownloadURL is the official VB-CABLE driver pack direct link (current

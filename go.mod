@@ -1,4 +1,4 @@
-module soundboard
+module github.com/jodagreyhame/SoundBoard
 
 go 1.25.5
 

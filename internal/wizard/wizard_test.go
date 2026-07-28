@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"soundboard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/devices"
 )
 
 // dev is a tiny helper to build a Device with just a name (RawID/IsDefault are
