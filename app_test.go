@@ -11,9 +11,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"soundboard/internal/catalog"
-	"soundboard/internal/config"
-	"soundboard/internal/setup"
+	"github.com/jodagreyhame/SoundBoard/internal/catalog"
+	"github.com/jodagreyhame/SoundBoard/internal/config"
+	"github.com/jodagreyhame/SoundBoard/internal/setup"
 )
 
 // fakeBackend builds a Backend with a fake catalog + the given settings and an

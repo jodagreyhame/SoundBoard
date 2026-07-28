@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"soundboard/internal/apm"
-	"soundboard/internal/denoise"
+	"github.com/jodagreyhame/SoundBoard/internal/apm"
+	"github.com/jodagreyhame/SoundBoard/internal/denoise"
 )
 
 // newWorkerFor builds a micWorker bound to an engine, WITHOUT starting its goroutine

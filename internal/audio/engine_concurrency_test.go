@@ -5,7 +5,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"soundboard/internal/catalog"
+	"github.com/jodagreyhame/SoundBoard/internal/catalog"
 )
 
 // newTestEngine builds an engine with a tiny in-memory library, no real audio

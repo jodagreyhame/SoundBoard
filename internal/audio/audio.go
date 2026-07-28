@@ -25,8 +25,8 @@ import (
 
 	"github.com/gen2brain/malgo"
 
-	"soundboard/internal/catalog"
-	"soundboard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/catalog"
+	"github.com/jodagreyhame/SoundBoard/internal/devices"
 )
 
 const (

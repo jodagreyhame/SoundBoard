@@ -6,7 +6,7 @@ import (
 	"testing/fstest"
 	"time"
 
-	"soundboard/internal/catalog"
+	"github.com/jodagreyhame/SoundBoard/internal/catalog"
 )
 
 // bufBytes returns a zeroed byte buffer sized for one period of interleaved

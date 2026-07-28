@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"soundboard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/devices"
 )
 
 func dev(name string) devices.Device { return devices.Device{Name: name} }
