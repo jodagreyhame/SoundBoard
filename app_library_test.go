@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -76,5 +78,31 @@ func TestClipFolderSnapshotCountsMatchLibrary(t *testing.T) {
 	snap := b.clipFolderSnapshot()
 	if snap.Categories != 2 || snap.Clips != 3 {
 		t.Fatalf("snapshot = %d categories / %d clips, want 2/3", snap.Categories, snap.Clips)
+	}
+}
+
+// TestAppVersionMatchesWailsJSON keeps the two places a version lives from
+// drifting apart. appVersion feeds the title-bar badge; wails.json's
+// productVersion feeds the Windows version resource and the installer metadata.
+// Nothing else couples them, and an unenforced pairing is exactly how the badge
+// came to read "v2" through an entire release cycle.
+func TestAppVersionMatchesWailsJSON(t *testing.T) {
+	raw, err := os.ReadFile("wails.json")
+	if err != nil {
+		t.Fatalf("read wails.json: %v", err)
+	}
+
+	var cfg struct {
+		Info struct {
+			ProductVersion string `json:"productVersion"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse wails.json: %v", err)
+	}
+
+	if cfg.Info.ProductVersion != appVersion {
+		t.Fatalf("wails.json productVersion = %q but appVersion = %q; bump both together, and the release tag with them",
+			cfg.Info.ProductVersion, appVersion)
 	}
 }
