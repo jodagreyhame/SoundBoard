@@ -201,7 +201,7 @@ don't race, and holds-last-then-ramps-to-silence on underrun rather than splicin
 | **Noise suppression** | **None**, **Standard** (APM *Moderate*), **High** (APM *High*, the default), **Strong** (RNNoise — the Krisp analogue). |
 | **Echo cancellation** | Toggles the APM echo canceller. Off by default. |
 | **Automatic gain control** | APM GainController1, adaptive-digital + limiter. Brings a quiet talker up, tames a loud one. |
-| **Attenuation** | Ducks clips under an open mic gate via an envelope follower, 0–100% (default ≈ −9 dB). |
+| **Attenuation** | Ducks clips under an open mic gate via an envelope follower, 0–100% (default 50%, ≈ −6 dB). |
 | **Push-to-talk hotkey** | Re-bound live from the UI and persisted. A combo another application already owns is rejected and logged, leaving the previous binding intact. |
 | **Audio subsystem** | Cosmetic selector kept for Discord parity. Persisted, but has **no engine effect** — there is one WASAPI backend. |
 
@@ -294,8 +294,9 @@ file with the audio. `--license cc0` restricts results to public-domain clips.
 ### Prerequisites
 
 - **Go 1.25+**
-- **cgo enabled with MinGW-w64 gcc on `PATH`** (`CC=gcc`, no clang/MSVC override). Required by
-  `malgo` (miniaudio) and the vendored RNNoise C sources.
+- **cgo enabled, with a C compiler on `PATH`.** Required by `malgo` (miniaudio) and the vendored
+  RNNoise C sources. **MinGW-w64 gcc** is what CI uses and the safe choice; a clang that targets
+  `x86_64-w64-mingw32` also builds it. MSVC will not work — cgo does not support it.
 - **[Wails v2 CLI](https://wails.io)** — optional; a plain `go build` works too.
 
 ### Build
@@ -337,7 +338,7 @@ tree is how you end up debugging a stale one.
 ```bash
 go vet ./...
 CGO_ENABLED=1 go test -count=1 ./...
-CGO_ENABLED=1 go test -race ./internal/audio/...   # the real-time path
+CGO_ENABLED=1 go test -race ./internal/audio/... ./internal/catalog/...   # what CI races
 ```
 
 ---
@@ -348,7 +349,9 @@ CGO_ENABLED=1 go test -race ./internal/audio/...   # the real-time path
 soundboard/
 ├── main.go                  # Wails entrypoint: frameless window, tray, lifecycle
 ├── app.go                   # methods bound into the webview + live events
+├── app_library.go           # bound methods for the clip folder (reload, relocate, reveal)
 ├── backend.go               # wires engine/catalog/setup/config/hotkeys to the bound App
+├── backend_library.go       # clip-folder bootstrap, rescanning, relocation
 ├── systray.go               # companion tray icon on its own goroutine
 ├── frontend/dist/           # the UI: index.html + styles.css + app.js (vanilla, no build step)
 ├── internal/
@@ -356,18 +359,26 @@ soundboard/
 │   ├── apm/                 # WebRTC AudioProcessingModule (embedded DLL, runtime-loaded)
 │   ├── denoise/             # RNNoise (vendored Xiph C sources, cgo)
 │   ├── catalog/             # walks the clip folder, lazy decode + resample to 48k/2ch/f32
+│   ├── library/             # WHERE the clip folder is: default, override, validation
 │   ├── config/              # JSON settings + log path
 │   ├── devices/             # WASAPI enumeration, VB-CABLE detection
 │   ├── hotkeys/             # global hotkeys + push-to-talk
 │   ├── setup/               # VB-CABLE detect, consented install, routing engage/restore
 │   ├── winaudio/            # COM MMDevice + IPolicyConfig (default-device switching)
 │   └── wizard/              # setup checklist text
-├── scripts/                 # import_sounds.sh, fetch_freesound.sh
-└── docs/                    # GUI design spec
+├── scripts/                 # import_sounds.sh, fetch_freesound.sh, clip_dir.sh
+└── docs/                    # GUI design spec, assets, design specs
 ```
 
-**Runtime files** live in `%AppData%\soundboard\` — `config.json` (volumes, favourites, hotkeys,
-processing settings) and `soundboard.log` (device resolution, routing, install, shutdown trail).
+**Runtime files** live in `%AppData%\soundboard\`:
+
+| File | Holds |
+|---|---|
+| `config.json` | volumes, favourites, hotkeys, processing settings, clip-folder path |
+| `soundboard.log` | device resolution, routing, install, shutdown trail |
+| `clipfolder.path` | the resolved clip folder, so the import scripts read it instead of guessing |
+
+Your **clips** are not here — they live in `Documents\SoundBoard` (or wherever you pointed them).
 
 ---
 
