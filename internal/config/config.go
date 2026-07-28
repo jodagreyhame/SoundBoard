@@ -32,6 +32,17 @@ type Settings struct {
 	// from JSON when empty.
 	Theme string `json:"theme,omitempty"`
 
+	// ClipFolder is the directory holding the clip library. Empty means "use the
+	// default", <Documents>/SoundBoard, which is resolved at startup rather than
+	// baked in here so the stored config stays portable between machines whose
+	// Documents folders differ (OneDrive redirection, a different user name).
+	// Omitted when empty so an upgraded config round-trips to its prior shape.
+	ClipFolder string `json:"clipFolder,omitempty"`
+
+	// ClipFolderNoticeSeen records that the user has been told where clips live,
+	// so the first-run notice appears once rather than on every launch.
+	ClipFolderNoticeSeen bool `json:"clipFolderNoticeSeen,omitempty"`
+
 	// Volumes holds the in-app mixer levels (all managed inside SoundBoard;
 	// nothing in Discord is changed by the user). Omitted when empty so an
 	// upgraded config without volumes round-trips to its prior shape.

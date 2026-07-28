@@ -307,9 +307,13 @@ func (a *App) GetState() State {
 	}
 	favorites := append([]string{}, s.Favorites...)
 
-	categories := make([]Category, 0, len(b.lib.Categories))
+	// Read the library through the engine, which is its single owner, so a
+	// reload or clip-folder change repaints the grid instead of leaving it
+	// showing clips the engine can no longer play.
+	lib := b.currentLibrary()
+	categories := make([]Category, 0, len(lib.Categories))
 	clips := []Clip{}
-	for _, cat := range b.lib.Categories {
+	for _, cat := range lib.Categories {
 		categories = append(categories, Category{Name: cat.Name, Count: len(cat.Clips)})
 		for _, c := range cat.Clips {
 			clips = append(clips, Clip{

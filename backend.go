@@ -14,10 +14,8 @@ package main
 
 import (
 	"io"
-	"io/fs"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +24,6 @@ import (
 
 	"github.com/jodagreyhame/SoundBoard/internal/apm"
 	"github.com/jodagreyhame/SoundBoard/internal/audio"
-	"github.com/jodagreyhame/SoundBoard/internal/catalog"
 	"github.com/jodagreyhame/SoundBoard/internal/config"
 	"github.com/jodagreyhame/SoundBoard/internal/devices"
 	"github.com/jodagreyhame/SoundBoard/internal/hotkeys"
@@ -41,10 +38,19 @@ import (
 // is serialized by the App's own mutex (see app.go).
 type Backend struct {
 	settings *config.Settings
-	lib      *catalog.Library
 	engine   *audio.Engine
 	setup    *routingController
 	hotkeys  *hotkeys.Manager
+
+	// Clip-folder metadata, guarded by libMu. The library ITSELF is not held
+	// here: it lives in the engine, which is the single owner, so a reload
+	// cannot leave the grid rendering clips the engine can no longer play.
+	// These fields only describe where that library came from and what went
+	// wrong, if anything, getting it.
+	libMu               sync.RWMutex
+	clipFolder          string
+	clipFolderIsDefault bool
+	clipFolderErr       string
 
 	ctx *malgo.AllocatedContext // malgo audio context; freed in close
 
@@ -76,19 +82,7 @@ func newBackend() *Backend {
 	}
 	b.settings = settings
 
-	root, base := soundsRootW()
-	soundsDir := filepath.Join(base, "sounds")
-	lib, err := catalog.New(root)
-	if err != nil {
-		log.Printf("build library from %s: %v (continuing with empty catalog)", soundsDir, err)
-		lib, _ = catalog.New(emptySoundsFS{})
-	}
-	b.lib = lib
-	clipCount := 0
-	for _, c := range lib.Categories {
-		clipCount += len(c.Clips)
-	}
-	log.Printf("library: %d categories, %d clips indexed from %s (decoded on demand)", len(lib.Categories), clipCount, soundsDir)
+	lib := b.initClipFolder()
 
 	ctx, err := malgo.InitContext(
 		[]malgo.Backend{malgo.BackendWasapi, malgo.BackendDsound},
@@ -452,27 +446,6 @@ func clipGainW(s *config.Settings, id string) float32 {
 	return 1
 }
 
-func soundsRootW() (fs.FS, string) {
-	var bases []string
-	if exe, err := os.Executable(); err == nil {
-		bases = append(bases, filepath.Dir(exe))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		bases = append(bases, wd)
-	}
-	for _, bs := range bases {
-		if st, err := os.Stat(filepath.Join(bs, "sounds")); err == nil && st.IsDir() {
-			return os.DirFS(bs), bs
-		}
-	}
-	base := "."
-	if len(bases) > 0 {
-		base = bases[0]
-	}
-	_ = os.MkdirAll(filepath.Join(base, "sounds"), 0o755)
-	return os.DirFS(base), base
-}
-
 func isCableNameW(name string) bool {
 	return strings.Contains(strings.ToUpper(name), "CABLE")
 }
@@ -523,30 +496,3 @@ func resolveSpeakersW(playback []devices.Device) (devices.Device, bool) {
 	return fallback, haveFallback
 }
 
-// emptySoundsFS is a minimal fs.FS exposing only an empty sounds/ directory so
-// catalog.New succeeds (returning an empty library) when the real sounds folder
-// could not be walked. Used only on the degraded bootstrap path.
-type emptySoundsFS struct{}
-
-func (emptySoundsFS) Open(name string) (fs.File, error) {
-	if name == "sounds" || name == "." {
-		return emptyDir{name: name}, nil
-	}
-	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
-}
-
-type emptyDir struct{ name string }
-
-func (d emptyDir) Stat() (fs.FileInfo, error)       { return emptyDirInfo{name: d.name}, nil }
-func (emptyDir) Read([]byte) (int, error)           { return 0, io.EOF }
-func (emptyDir) Close() error                       { return nil }
-func (emptyDir) ReadDir(int) ([]fs.DirEntry, error) { return nil, io.EOF }
-
-type emptyDirInfo struct{ name string }
-
-func (i emptyDirInfo) Name() string     { return i.name }
-func (emptyDirInfo) Size() int64        { return 0 }
-func (emptyDirInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o555 }
-func (emptyDirInfo) ModTime() time.Time { return time.Time{} }
-func (emptyDirInfo) IsDir() bool        { return true }
-func (emptyDirInfo) Sys() any           { return nil }

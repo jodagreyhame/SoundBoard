@@ -11,23 +11,27 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/jodagreyhame/SoundBoard/internal/audio"
 	"github.com/jodagreyhame/SoundBoard/internal/catalog"
 	"github.com/jodagreyhame/SoundBoard/internal/config"
 	"github.com/jodagreyhame/SoundBoard/internal/setup"
 )
 
 // fakeBackend builds a Backend with a fake catalog + the given settings and an
-// absent-cable routing controller, with NO audio context/engine. Only the
-// fields GetState reads (settings, lib, setup) are populated.
+// absent-cable routing controller, and a bare engine holding the library.
+// Only the fields GetState reads (settings, engine, setup) are populated.
 func fakeBackend(t *testing.T, fsys fstest.MapFS, s *config.Settings) *Backend {
 	t.Helper()
 	lib, err := catalog.New(fsys)
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)
 	}
+	// The engine is the library's single owner, so even a backend with no audio
+	// context needs one for GetState to see any clips. NewEngine(nil, …) builds
+	// a bare engine with no devices, which is exactly what these tests want.
 	return &Backend{
 		settings: s,
-		lib:      lib,
+		engine:   audio.NewEngine(nil, lib),
 		setup:    &routingController{status: setup.Status{}}, // cable absent
 	}
 }
