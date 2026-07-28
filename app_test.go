@@ -11,23 +11,27 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/jodagreyhame/SoundBoard/internal/audio"
 	"github.com/jodagreyhame/SoundBoard/internal/catalog"
 	"github.com/jodagreyhame/SoundBoard/internal/config"
 	"github.com/jodagreyhame/SoundBoard/internal/setup"
 )
 
 // fakeBackend builds a Backend with a fake catalog + the given settings and an
-// absent-cable routing controller, with NO audio context/engine. Only the
-// fields GetState reads (settings, lib, setup) are populated.
+// absent-cable routing controller, and a bare engine holding the library.
+// Only the fields GetState reads (settings, engine, setup) are populated.
 func fakeBackend(t *testing.T, fsys fstest.MapFS, s *config.Settings) *Backend {
 	t.Helper()
 	lib, err := catalog.New(fsys)
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)
 	}
+	// The engine is the library's single owner, so even a backend with no audio
+	// context needs one for GetState to see any clips. NewEngine(nil, …) builds
+	// a bare engine with no devices, which is exactly what these tests want.
 	return &Backend{
 		settings: s,
-		lib:      lib,
+		engine:   audio.NewEngine(nil, lib),
 		setup:    &routingController{status: setup.Status{}}, // cable absent
 	}
 }
@@ -47,10 +51,10 @@ func newAppWithBackend(b *Backend) *App {
 // theme defaulting to dark, and routing reported absent.
 func TestGetStateAssemblesFromCatalog(t *testing.T) {
 	fsys := fstest.MapFS{
-		"sounds/memes/airhorn.wav":      {Data: []byte("x")},
-		"sounds/memes/sad-trombone.mp3": {Data: []byte("x")},
-		"sounds/games/level_up.ogg":     {Data: []byte("x")},
-		"sounds/games/.keep":            {Data: []byte("")},
+		"memes/airhorn.wav":      {Data: []byte("x")},
+		"memes/sad-trombone.mp3": {Data: []byte("x")},
+		"games/level_up.ogg":     {Data: []byte("x")},
+		"games/.keep":            {Data: []byte("")},
 	}
 	s := &config.Settings{
 		Favorites: []string{"memes/airhorn"},
@@ -149,7 +153,7 @@ func TestGetStateAssemblesFromCatalog(t *testing.T) {
 // TestGetStateEmptyLibrary verifies an EMPTY catalog yields non-nil empty slices
 // /maps (never JSON null), so the frontend can iterate without guards.
 func TestGetStateEmptyLibrary(t *testing.T) {
-	fsys := fstest.MapFS{"sounds/.keep": {Data: []byte("")}}
+	fsys := fstest.MapFS{".keep": {Data: []byte("")}}
 	app := newAppWithBackend(fakeBackend(t, fsys, &config.Settings{}))
 
 	st := app.GetState()

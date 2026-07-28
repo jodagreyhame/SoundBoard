@@ -186,6 +186,7 @@ func (a *App) runCleanup() {
 
 // State is the full snapshot the frontend renders from on boot.
 type State struct {
+	Version    string             `json:"version"`
 	Theme      string             `json:"theme"`
 	Routing    RoutingStatus      `json:"routing"`
 	Categories []Category         `json:"categories"`
@@ -277,6 +278,7 @@ func (a *App) GetState() State {
 		// No backend (e.g. a unit test constructed a bare App): return a minimal,
 		// well-formed snapshot so the frontend still renders without panicking.
 		return State{
+			Version:    appVersion,
 			Theme:      "dark",
 			Routing:    RoutingStatus{State: "absent", Detail: "Backend not initialized.", CanEngage: false},
 			Categories: []Category{},
@@ -307,9 +309,13 @@ func (a *App) GetState() State {
 	}
 	favorites := append([]string{}, s.Favorites...)
 
-	categories := make([]Category, 0, len(b.lib.Categories))
+	// Read the library through the engine, which is its single owner, so a
+	// reload or clip-folder change repaints the grid instead of leaving it
+	// showing clips the engine can no longer play.
+	lib := b.currentLibrary()
+	categories := make([]Category, 0, len(lib.Categories))
 	clips := []Clip{}
-	for _, cat := range b.lib.Categories {
+	for _, cat := range lib.Categories {
 		categories = append(categories, Category{Name: cat.Name, Count: len(cat.Clips)})
 		for _, c := range cat.Clips {
 			clips = append(clips, Clip{
@@ -354,6 +360,7 @@ func (a *App) GetState() State {
 	a.lcMu.Unlock()
 
 	return State{
+		Version:    appVersion,
 		Theme:      theme,
 		Routing:    b.setup.snapshot(),
 		Categories: categories,

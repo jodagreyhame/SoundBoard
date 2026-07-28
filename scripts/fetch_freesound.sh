@@ -31,7 +31,7 @@
 #   -h, --help           this text
 #
 # ATTRIBUTION
-#   Every fetched clip is appended to sounds/<category>/ATTRIBUTION.md with its
+#   Every fetched clip is appended to <clip folder>/<category>/ATTRIBUTION.md with its
 #   Freesound ID, author, licence and URL. CC-BY audio REQUIRES that you credit the
 #   author if you redistribute it. Keep that file with the audio.
 #
@@ -83,8 +83,15 @@ case "$LICENSE" in
 esac
 FILTER="${FILTER:+$FILTER }duration:[0 TO $MAX_DUR]"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="$ROOT/sounds/$CATEGORY"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/clip_dir.sh
+. "$SCRIPT_DIR/clip_dir.sh"
+command -v soundboard_require_clip_dir >/dev/null 2>&1 || {
+  echo "error: scripts/clip_dir.sh failed to load" >&2; exit 1; }
+# Aborts with an explanation rather than guessing a path and writing
+# clips where SoundBoard will never look for them.
+CLIP_DIR="$(soundboard_require_clip_dir)"
+DEST="$CLIP_DIR/$CATEGORY"
 ATTR="$DEST/ATTRIBUTION.md"
 
 slug() {
@@ -134,7 +141,7 @@ while IFS=$'\t' read -r id name license username duration preview page; do
        -af "loudnorm=I=-16:TP=-1.5:LRA=11" -ar 48000 -ac 2 -c:a pcm_s16le "$out" 2>/dev/null; then
     printf '  fetched     : %-34s %s by %s\n' "$CATEGORY/$base.wav" "$license" "$username"
     [ -f "$ATTR" ] || {
-      printf '# Attribution — sounds/%s\n\nAudio fetched from Freesound (https://freesound.org).\nCC-BY clips REQUIRE crediting the author if you redistribute them.\nKeep this file alongside the audio.\n\n| Clip | Freesound ID | Author | Licence | Source |\n|---|---|---|---|---|\n' "$CATEGORY" > "$ATTR"
+      printf '# Attribution — %s\n\nAudio fetched from Freesound (https://freesound.org).\nCC-BY clips REQUIRE crediting the author if you redistribute them.\nKeep this file alongside the audio.\n\n| Clip | Freesound ID | Author | Licence | Source |\n|---|---|---|---|---|\n' "$CATEGORY" > "$ATTR"
     }
     printf '| `%s.wav` | %s | %s | %s | %s |\n' "$base" "$id" "$username" "$license" "$page" >> "$ATTR"
     ok=$((ok+1))
@@ -149,9 +156,9 @@ echo
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "Dry run: $ok would be fetched."
 else
-  echo "Fetched $ok into sounds/$CATEGORY/ ($failed failed)."
-  [ "$ok" -gt 0 ] && echo "Attribution recorded in sounds/$CATEGORY/ATTRIBUTION.md — keep it with the audio."
-  echo "Restart SoundBoard to pick up new clips."
+  echo "Fetched $ok into $CATEGORY/ ($failed failed)."
+  [ "$ok" -gt 0 ] && echo "Attribution recorded in $CATEGORY/ATTRIBUTION.md — keep it with the audio."
+  echo "Press Reload in SoundBoard to pick up new clips."
 fi
 
 [ "$failed" -eq 0 ]

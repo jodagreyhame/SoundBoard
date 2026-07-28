@@ -29,8 +29,8 @@ func pumpDuplex(e *Engine, n int) {
 func newTwoClipEngine(t *testing.T) (e *Engine, idA, idB string) {
 	t.Helper()
 	lib, err := catalog.New(fstest.MapFS{
-		"sounds/test/a.wav": {Data: []byte("not decoded in this test")},
-		"sounds/test/b.wav": {Data: []byte("not decoded in this test")},
+		"test/a.wav": {Data: []byte("not decoded in this test")},
+		"test/b.wav": {Data: []byte("not decoded in this test")},
 	})
 	if err != nil {
 		t.Fatalf("catalog.New: %v", err)
@@ -74,7 +74,7 @@ func TestPlayingSetClearsWhenClipEnds(t *testing.T) {
 
 	// The clip is fadeFrames*4 frames long; run well past it. The cursor retires
 	// inside mixInto and the very next publish must report an empty set.
-	clipFrames := len(e.lib.Get(id).PCM) / channels
+	clipFrames := len(e.Library().Get(id).PCM) / channels
 	pumpDuplex(e, clipFrames/periodFrames+2)
 
 	got, ok = e.PlayingClips()
@@ -173,7 +173,7 @@ func TestPublishIsAllocationFree(t *testing.T) {
 	e, id := newTestEngine(t)
 	// A clip long enough to stay active for every measured buffer, so the
 	// publishing path (not the idle fast path) is what gets measured.
-	e.lib.Get(id).PCM = flat(0.3, periodFrames*(runs+8))
+	e.Library().Get(id).PCM = flat(0.3, periodFrames*(runs+8))
 	e.TriggerGain(id, 1)
 
 	out, mic := bufBytes(), bufBytes()

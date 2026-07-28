@@ -18,6 +18,7 @@ package audio
 
 import (
 	"errors"
+	"log"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -164,7 +165,17 @@ func float32frombits(u uint32) float32 { return math.Float32frombits(u) }
 // cursor lists. Each device has its OWN cursor list (independent clocks).
 type Engine struct {
 	ctx *malgo.AllocatedContext
-	lib *catalog.Library
+
+	// lib is the single source of truth for the clip library, swappable at
+	// runtime so the user can change clip folder or reload without a restart.
+	//
+	// The real-time callbacks never read it: they consume pendingClip values
+	// that already carry a *catalog.Clip with decoded PCM, and drainInto copies
+	// the PCM slice header into a cursor at creation time. A clip already in
+	// flight therefore keeps playing safely across a swap, because the cursor
+	// holds the backing array alive regardless of which library is current.
+	// Only the control-path callers below (TriggerGain, StopClip) load it.
+	lib atomic.Pointer[catalog.Library]
 
 	mic   devices.Device
 	cable devices.Device
@@ -333,10 +344,10 @@ type Engine struct {
 func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 	e := &Engine{
 		ctx:        ctx,
-		lib:        lib,
 		pending:    make(chan pendingClip, pendingCap),
 		monPending: make(chan pendingClip, pendingCap),
 	}
+	e.lib.Store(lib)
 	e.micGainBits.Store(float32bits(1))
 	e.masterGainBits.Store(float32bits(1))
 	e.monitorGainBits.Store(float32bits(1))
@@ -359,6 +370,27 @@ func NewEngine(ctx *malgo.AllocatedContext, lib *catalog.Library) *Engine {
 	e.nsTierBits.Store(nsTierNone)
 	e.attenAmountBits.Store(float32bits(defaultAttenAmount))
 	return e
+}
+
+// Library returns the clip library currently in use. It may be nil for a bare
+// engine constructed without one.
+//
+// This is the single source of truth for the library: the UI renders from it
+// too, so nothing else should keep its own handle. A second copy elsewhere
+// would drift the moment the user reloads or changes clip folder, leaving the
+// grid showing clips the engine can no longer play.
+func (e *Engine) Library() *catalog.Library {
+	return e.lib.Load()
+}
+
+// SetLibrary swaps the clip library. Safe to call from any goroutine.
+//
+// Clips already playing are unaffected: their cursors hold the decoded PCM
+// directly, so they finish normally against the old library while every new
+// trigger resolves against the new one. Decoded PCM is NOT carried over — the
+// new library has fresh Clip values, so clips re-decode lazily on next play.
+func (e *Engine) SetLibrary(lib *catalog.Library) {
+	e.lib.Store(lib)
 }
 
 // SetMicGain sets the live mic-passthrough gain (linear, 1.0 = unchanged).
@@ -796,14 +828,22 @@ func (e *Engine) Trigger(id string) { e.TriggerGain(id, 1) }
 // is somehow full, the extra trigger is dropped rather than blocking this
 // (non-RT) goroutine. Implements ui.Player.
 func (e *Engine) TriggerGain(id string, gain float32) {
-	clip := e.lib.Get(id)
+	lib := e.Library()
+	if lib == nil {
+		return
+	}
+	clip := lib.Get(id)
 	if clip == nil {
+		// Reachable after a library reload or a clip folder change: a saved
+		// hotkey or a stale UI tile can name a clip that no longer exists. Say
+		// so, or the button simply does nothing and the user has no idea why.
+		log.Printf("audio: no clip with id %q in the current library; it may have been renamed, moved, or removed", id)
 		return
 	}
 	// Decode on first play (off the RT path, on this goroutine). EnsureDecoded
 	// fully populates clip.PCM before we hand the clip to a callback over the
 	// channel, so the callback's later read is safely published via the channel.
-	if _, err := e.lib.EnsureDecoded(clip); err != nil || len(clip.PCM) == 0 {
+	if _, err := lib.EnsureDecoded(clip); err != nil || len(clip.PCM) == 0 {
 		return
 	}
 	// Capture only the per-clip gain, clamped to the same [0, maxGain] range as
@@ -864,11 +904,24 @@ func (e *Engine) StopAll() {
 // the live cursors, so the surviving clip's chip correctly stays until it really
 // stops.
 func (e *Engine) StopClip(id string) {
-	clip := e.lib.Get(id)
-	if clip == nil {
-		return
+	// The registry, not the library, is the authority on what is playing: a
+	// cursor started before a reload keeps running against the OLD library, so
+	// resolving through the current one would fail to stop a clip the user can
+	// still hear. Try the id as given first; only fall back to the library to
+	// canonicalise an extension-suffixed id (e.g. a hotkey bound to
+	// "memes/airhorn.mp3" against the canonical "memes/airhorn").
+	idx, ok := e.registry.lookup(id)
+	if !ok {
+		lib := e.Library()
+		if lib == nil {
+			return
+		}
+		clip := lib.Get(id)
+		if clip == nil {
+			return
+		}
+		idx, ok = e.registry.lookup(clip.ID)
 	}
-	idx, ok := e.registry.lookup(clip.ID)
 	if !ok {
 		return
 	}

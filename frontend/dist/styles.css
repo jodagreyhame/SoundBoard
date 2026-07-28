@@ -279,6 +279,39 @@ html, body {
 .stop-btn.armed { background: var(--error); color: #fff; }
 
 /* Now-playing chips. */
+/* Clip-folder notice. Uses the warning palette rather than the error one by
+   default: on first run nothing is wrong, the user simply needs to know where
+   the clips go. It switches to the error palette via .clipfolder-bad when
+   resolving or scanning the folder actually failed. */
+.clipfolder {
+  flex: none; display: flex; align-items: flex-start; gap: 14px;
+  margin: 0 18px 12px; padding: 12px 14px;
+  background: var(--warn-bg); border: 1px solid var(--warning); border-radius: 10px;
+}
+.clipfolder.clipfolder-bad { background: var(--err-bg); border-color: var(--error); }
+.clipfolder-body { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1; }
+.clipfolder-title { font-size: 11px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; color: var(--dim); }
+.clipfolder-path {
+  font-size: 12px; font-weight: 600; color: var(--fg);
+  /* Long paths must wrap rather than stretch the panel; Windows paths have no
+     spaces to break on, so break anywhere. */
+  word-break: break-all; white-space: normal;
+}
+.clipfolder-hint { font-size: 11px; line-height: 1.5; color: var(--dim); }
+.clipfolder-hint code { font-size: 11px; color: var(--fg); }
+.clipfolder-error { font-size: 11px; line-height: 1.5; color: var(--error); word-break: break-word; }
+/* A notice means the app is working but did something worth mentioning,
+   most often falling back to the default folder. Deliberately not red. */
+.clipfolder-notice-text { font-size: 11px; line-height: 1.5; color: var(--warning); word-break: break-word; }
+.clipfolder-actions { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.clipfolder-btn {
+  font: inherit; font-size: 11px; font-weight: 700; white-space: nowrap;
+  padding: 6px 11px; border-radius: 7px; cursor: pointer;
+  background: var(--elev); border: 1px solid var(--line); color: var(--fg);
+}
+.clipfolder-btn:hover { border-color: var(--primary); }
+.clipfolder-btn-ghost { background: transparent; color: var(--dim); }
+
 .nowplaying { flex: none; display: flex; align-items: center; gap: 9px; padding: 0 18px 12px; }
 .nowplaying .np-label { font-size: 10px; font-weight: 800; letter-spacing: .6px; color: var(--faint); flex: none; }
 .nowplaying .np-chips { display: flex; gap: 8px; flex-wrap: wrap; }
