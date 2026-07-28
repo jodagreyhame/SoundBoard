@@ -2,8 +2,10 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -503,5 +505,45 @@ func TestSaveOverwriteAtomic(t *testing.T) {
 		if e.Name() != configFile {
 			t.Errorf("unexpected leftover file in config dir: %s", e.Name())
 		}
+	}
+}
+
+// TestClipFolderAbsentFromLegacyConfig pins backward compatibility for configs
+// written before the clip folder became a setting. An upgrading user's file has
+// neither key; both must default to "use the default folder" and "the user has
+// not been told yet", and re-saving must not inject the keys into a file that
+// never had them.
+func TestClipFolderAbsentFromLegacyConfig(t *testing.T) {
+	tmp := pointConfigDir(t)
+
+	cfgDir := filepath.Join(tmp, "soundboard")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"micName":"Mic","cableName":"CABLE Input","monitor":true,"theme":"light"}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.ClipFolder != "" {
+		t.Errorf("ClipFolder = %q, want empty so the default is resolved at runtime", s.ClipFolder)
+	}
+	if s.ClipFolderNoticeSeen {
+		t.Error("ClipFolderNoticeSeen = true for a legacy config; an upgrading user has not been told where clips moved to")
+	}
+
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	out, err := os.ReadFile(filepath.Join(cfgDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "clipFolder") {
+		t.Errorf("re-saving a legacy config injected clipFolder keys: %s", out)
 	}
 }
