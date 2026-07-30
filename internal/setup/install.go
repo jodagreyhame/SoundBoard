@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -119,12 +120,26 @@ func installCable(ctx context.Context) error {
 	// that genuinely still need a reboot, the cable simply won't enumerate until
 	// restart, and the caller detects that and says so. The service bounce briefly
 	// drops all system audio for a moment — expected, not a failure.
+	// The installer's OWN exit code is what decides success — it must survive the
+	// two best-effort steps that follow it. %ERRORLEVEL% is captured into EC on
+	// the line immediately after the installer (a plain statement, not inside a
+	// parenthesised block, so no delayed expansion is needed) and re-raised by the
+	// final `exit /b %EC%`. An earlier revision ended with a literal `exit /b 0`,
+	// which meant cmd.exe ALWAYS reported success: a silently failing install was
+	// indistinguishable from a working one, and the UI told users "VB-CABLE
+	// installed" for an install that never happened.
+	//
+	// `cd /d` puts the working directory on the extracted driver pack, because
+	// ShellExecuteEx's lpDirectory is the launched image's directory (System32,
+	// since we launch cmd.exe) rather than the payload's.
 	batPath := filepath.Join(tmp, "vbcable_install.bat")
 	script := "@echo off\r\n" +
+		`cd /d "` + filepath.Dir(exePath) + `"` + "\r\n" +
 		`"` + exePath + `" -i -h` + "\r\n" +
+		"set EC=%ERRORLEVEL%\r\n" +
 		"pnputil /scan-devices >nul 2>&1\r\n" +
 		`powershell -NoProfile -ExecutionPolicy Bypass -Command "Restart-Service -Name 'AudioEndpointBuilder' -Force -ErrorAction SilentlyContinue"` + " >nul 2>&1\r\n" +
-		"exit /b 0\r\n"
+		"exit /b %EC%\r\n"
 	if err := os.WriteFile(batPath, []byte(script), 0o600); err != nil {
 		return fmt.Errorf("setup: write install script: %w", err)
 	}
@@ -133,7 +148,19 @@ func installCable(ctx context.Context) error {
 	if comspec == "" {
 		comspec = `C:\Windows\System32\cmd.exe`
 	}
-	return runElevatedAndWait(ctx, comspec, `/c "`+batPath+`"`)
+	// Log the install attempt and its outcome. Until now NOTHING in this file
+	// logged: install results reached the UI only as Wails events, so a remote
+	// user's soundboard.log recorded that the cable was missing but never a single
+	// word about what the installer did — leaving no way to tell a declined
+	// driver-trust prompt from a blocked driver from a download fallback.
+	log.Printf("install: launching elevated VB-CABLE installer (%s -i -h)", exePath)
+	err = runElevatedAndWait(ctx, comspec, `/c "`+batPath+`"`)
+	if err != nil {
+		log.Printf("install: FAILED: %v", err)
+	} else {
+		log.Printf("install: installer completed successfully (endpoints may still need a Windows restart)")
+	}
+	return err
 }
 
 // downloadAny tries each URL in order and writes the first successful response
@@ -144,10 +171,20 @@ func downloadAny(ctx context.Context, urls []string, dst string) error {
 	defer cancel()
 
 	var lastErr error
-	for _, url := range urls {
+	for i, url := range urls {
 		if err := downloadOne(dctx, url, dst); err != nil {
+			log.Printf("install: download %s failed: %v", url, err)
 			lastErr = err
 			continue
+		}
+		// Which pack was used matters and must be in the log. The newest pack is
+		// WHCP-signed and installs without Windows' driver-trust prompt; the older
+		// fallback is not, so a transient CDN failure silently downgrades the user
+		// to a pack that can stall on a prompt our headless install cannot answer.
+		if i > 0 {
+			log.Printf("install: WARNING using fallback driver pack %s (the current pack was unreachable)", url)
+		} else {
+			log.Printf("install: downloaded driver pack %s", url)
 		}
 		return nil
 	}
@@ -363,9 +400,12 @@ func waitProcess(ctx context.Context, hProcess uintptr) error {
 	}
 }
 
-// checkExitCode reads the installer's exit code. VBCABLE_Setup returns 0 on a
-// clean install; any non-zero code is surfaced (the install may still need a
-// reboot, which is not an error here).
+// checkExitCode reads the installer's exit code, which the install script
+// re-raises through cmd.exe (see installCable). VBCABLE_Setup returns 0 on a
+// clean install; any non-zero code means the driver did NOT install and is
+// surfaced to the user, because the alternative — reporting success — sends them
+// into a reinstall loop that can never succeed. A successful install may still
+// need a reboot before the endpoints enumerate; that is not an error here.
 func checkExitCode(hProcess uintptr) error {
 	var code uint32
 	r, _, _ := procGetExitCode.Call(hProcess, uintptr(unsafe.Pointer(&code)))
@@ -373,7 +413,7 @@ func checkExitCode(hProcess uintptr) error {
 		return nil // could not read code; assume launched OK
 	}
 	if code != 0 {
-		return fmt.Errorf("setup: VB-CABLE installer exited with code %d", code)
+		return fmt.Errorf("setup: the VB-CABLE installer failed (exit code %d) — the driver was not installed. Try installing VB-CABLE manually from %s: unzip it, right-click VBCABLE_Setup_x64.exe, choose \"Run as administrator\", then restart Windows", code, primaryDownloadURL)
 	}
 	return nil
 }

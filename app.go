@@ -791,22 +791,41 @@ func (a *App) SetPTTHotkey(combo string) {
 func (a *App) InstallRouting() {
 	b := a.getBackend()
 	if b == nil {
-		a.emitInstallProgress("Backend not initialized.", true, "backend unavailable")
+		a.emitInstallProgress("Backend not initialized.", true, "backend unavailable", "")
 		return
 	}
 	go func() {
+		// Re-detect BEFORE choosing install-vs-engage. The cached status is written
+		// at process start and, without this, nowhere else — so the branch was
+		// picked from state that could predate an install earlier in this session,
+		// the user enabling a disabled endpoint in Sound settings, or a transient
+		// enumeration failure during login autostart. Each of those ran the elevated
+		// installer — and raised a UAC prompt — on a machine whose cable was already
+		// there, which is the reinstall loop users actually hit.
+		b.redetect()
 		if b.setup.CanEngage() && !b.setup.Engaged() {
+			// The engine is only wired into CABLE Input when the cable existed at
+			// startup (newBackend configures and starts it exactly once). If the
+			// cable appeared mid-session — the redetect above just found it —
+			// engaging now would hijack the Windows default mic while the board
+			// feeds NOTHING into the cable: Discord would hear pure silence,
+			// presented as success. A fresh process wires everything; say so.
+			if !b.audioRunning {
+				a.emitInstallProgress("VB-CABLE is installed and detected, but SoundBoard started before it existed, so the soundboard is not wired into it yet. Restart SoundBoard to finish setup.", true, "", "restart")
+				a.emitRoutingStatus(b.setup.snapshot())
+				return
+			}
 			// These messages describe only what THIS process did to the Windows
 			// default recording device. They must never claim anything about
 			// Discord: its input-device selection and noise-suppression settings
 			// are not readable from here.
-			a.emitInstallProgress("Engaging routing — pointing your default mic at CABLE Output…", false, "")
+			a.emitInstallProgress("Engaging routing — pointing your default mic at CABLE Output…", false, "", "")
 			if err := b.setup.Engage(); err != nil {
-				a.emitInstallProgress("Could not engage routing.", true, err.Error())
+				a.emitInstallProgress("Could not engage routing.", true, err.Error(), "")
 				a.emitRoutingStatus(b.setup.snapshot())
 				return
 			}
-			a.emitInstallProgress("Routing engaged — your default mic now points at CABLE Output.", true, "")
+			a.emitInstallProgress("Routing engaged — your default mic now points at CABLE Output.", true, "", "engaged")
 			a.emitRoutingStatus(b.setup.snapshot())
 			return
 		}
@@ -814,14 +833,33 @@ func (a *App) InstallRouting() {
 		// Cable absent (or output missing): run the elevated installer. It blocks
 		// until the installer process exits; a reboot may still be needed before
 		// the endpoints appear, which the final message surfaces.
-		a.emitInstallProgress("Downloading and installing VB-CABLE (approve the Windows prompt)…", false, "")
+		a.emitInstallProgress("Downloading and installing VB-CABLE (approve the Windows prompt)…", false, "", "")
 		if err := b.setup.Install(); err != nil {
-			a.emitInstallProgress("VB-CABLE install did not complete.", true, err.Error())
+			a.emitInstallProgress("VB-CABLE install did not complete.", true, err.Error(), "")
 			a.emitRoutingStatus(b.setup.snapshot())
 			return
 		}
-		a.emitInstallProgress("VB-CABLE installed. Windows usually needs a full restart before the new device appears — restart Windows, then launch SoundBoard again to engage routing.", true, "")
-		a.emitRoutingStatus(b.setup.snapshot())
+		// VERIFY, do not assume. The installer exiting 0 is necessary but not
+		// sufficient: the driver may need a reboot before Windows publishes the
+		// endpoints, and endpoints can exist yet be DISABLED (invisible to every
+		// enumeration path we have). Re-detect and let the endpoints themselves
+		// decide the message, so we never again report "installed" for a machine
+		// that will still say "absent" on the next launch — the reinstall loop.
+		st := b.redetect()
+		if st.CanEngage {
+			// Detected — but this process booted without the cable, so its engine is
+			// not wired into CABLE Input (see the !audioRunning guard above). The
+			// honest next step is an app restart, never "engage".
+			a.emitInstallProgress("VB-CABLE installed and detected. Restart SoundBoard to finish wiring the soundboard into it.", true, "", "restart")
+		} else {
+			// Name the two traps that make a "restart" not count and make reinstalling
+			// futile, because the app cannot see either one: Fast Startup turns Shut
+			// Down into a hibernate that never re-initialises the driver, and a
+			// DISABLED endpoint is invisible to every enumeration path we have while
+			// surviving both reboots and reinstalls.
+			a.emitInstallProgress("The VB-CABLE installer finished, but Windows has not published the CABLE devices yet.\n\nUse Start ▸ Power ▸ RESTART, not Shut down — with Fast Startup enabled a shutdown does not fully reload drivers. Then launch SoundBoard again.\n\nIf it still says VB-CABLE is missing after that restart, do NOT reinstall — it cannot help. Open Windows Sound settings (mmsys.cpl), right-click inside the Playback and Recording tabs and tick \"Show Disabled Devices\": if CABLE Input / CABLE Output appear greyed out, enable them.", true, "", "reboot")
+		}
+		a.emitRoutingStatus(st)
 	}()
 }
 
@@ -831,7 +869,23 @@ func (a *App) GetRoutingStatus() RoutingStatus {
 	if b := a.getBackend(); b != nil {
 		return b.setup.snapshot()
 	}
-	return RoutingStatus{State: "absent", Detail: "Backend not initialized.", CanEngage: false}
+	return RoutingStatus{State: "unavailable", Detail: "Backend not initialized.", CanEngage: false}
+}
+
+// RedetectRouting re-enumerates audio devices and returns (and broadcasts) the
+// refreshed routing status. It exists so "VB-CABLE not detected" is RECOVERABLE
+// within a session: the status used to be read once at startup and never again,
+// so enabling a disabled endpoint in Sound settings, or a one-off enumeration
+// failure during login autostart, left the app insisting on an install until the
+// user restarted it — and reinstalling is exactly what cannot fix either case.
+func (a *App) RedetectRouting() RoutingStatus {
+	b := a.getBackend()
+	if b == nil {
+		return RoutingStatus{State: "unavailable", Detail: "Backend not initialized.", CanEngage: false}
+	}
+	st := b.redetect()
+	a.emitRoutingStatus(st)
+	return st
 }
 
 // ---------------------------------------------------------------------------
@@ -1122,10 +1176,16 @@ func (a *App) emitRoutingStatus(s RoutingStatus) {
 }
 
 // emitInstallProgress pushes an install/engage progress update.
-func (a *App) emitInstallProgress(msg string, done bool, errMsg string) {
+// emitInstallProgress drives the install/engage dialog. kind discriminates the
+// DONE outcome for the frontend, which must choose a card without guessing from
+// prose: "engaged" (routing live now), "restart" (cable detected but this
+// process cannot use it — an app restart finishes), "reboot" (endpoints not
+// published — Windows restart or Sound-settings check needed). Empty for
+// non-terminal progress and for error outcomes (err carries those).
+func (a *App) emitInstallProgress(msg string, done bool, errMsg, kind string) {
 	if ctx := a.context(); ctx != nil {
 		runtime.EventsEmit(ctx, "installProgress", map[string]any{
-			"msg": msg, "done": done, "err": errMsg,
+			"msg": msg, "done": done, "err": errMsg, "kind": kind,
 		})
 	}
 }
