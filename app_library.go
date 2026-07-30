@@ -23,7 +23,7 @@ import (
 //
 // Keep it in step with productVersion in wails.json, which feeds the Windows
 // version resource, and with the release tag.
-const appVersion = "1.1.0"
+const appVersion = "1.1.1"
 
 // ClipFolderInfo is the front end's view of where clips live.
 type ClipFolderInfo struct {
