@@ -67,7 +67,8 @@ first**, and declining closes the app rather than leaving it half-working.
 
 VB-CABLE is a virtual audio device — it is what lets SoundBoard hand audio to other applications
 as if it were a microphone. Installing an audio driver needs administrator approval, and usually
-a Windows restart before the new device appears.
+a Windows restart before the new device appears. If SoundBoard keeps asking to install it, see
+[Troubleshooting](#troubleshooting) — the cable is probably already there under a different name.
 
 ### 3. Add clips
 
@@ -401,6 +402,48 @@ port would be a different implementation sharing only the mixing logic, not a bu
 
 Soundboards that inject audio into voice channels can be disruptive, and many servers have rules
 about them. Use it where it's welcome.
+
+---
+
+## Troubleshooting
+
+### SoundBoard keeps asking to install VB-CABLE — even after installing and rebooting
+
+Reinstalling is almost never the fix, and SoundBoard will no longer keep suggesting it. The
+cable is usually already there but invisible to detection, for one of these reasons — check them
+in order:
+
+1. **The endpoint was renamed.** Windows lets you rename audio devices, and a rename survives
+   both reboots and driver reinstalls. If your VB-CABLE playback device shows up as something
+   like **"Speakers (VB-Audio Virtual Cable)"** instead of **"CABLE Input"**, that's this.
+   Current builds recognise any endpoint carrying the **VB-Audio Virtual Cable** adapter name,
+   whatever it was renamed to; on older builds, rename it back to `CABLE Input` in Sound
+   settings.
+2. **The endpoint is disabled.** Disabled devices are invisible to SoundBoard and stay disabled
+   through reinstalls. Press `Win+R`, run `mmsys.cpl`, right-click inside the **Playback** and
+   **Recording** tabs and tick **Show Disabled Devices**. If **CABLE Input** or **CABLE Output**
+   appear greyed out, right-click → **Enable**.
+3. **The "restart" wasn't a real restart.** With Fast Startup enabled (the Windows default),
+   **Shut down** hibernates the kernel and does *not* reload drivers. Use **Start → Power →
+   Restart** specifically.
+4. **The driver genuinely isn't installed.** In an administrator prompt, run
+   `pnputil /enum-drivers | findstr /i vbaudio` — no output means no driver. Install manually
+   from [vb-audio.com/Cable](https://vb-audio.com/Cable/): unzip, right-click
+   `VBCABLE_Setup_x64.exe`, **Run as administrator** (keep its window visible so you see its own
+   result), then restart Windows.
+
+### The installer said it succeeded but the device never appeared
+
+Restart Windows (a real **Restart**, see above), then launch SoundBoard again. If the device is
+still missing, work through the list above — and don't reinstall in a loop; if the endpoints
+exist but are renamed or disabled, no number of reinstalls will change that.
+
+### Reporting a bug
+
+Attach `%AppData%\soundboard\soundboard.log`. It records device resolution, routing, the install
+trail, and — whenever the cable is not found — the full list of audio devices SoundBoard could
+see, which is usually enough to spot a renamed or missing endpoint at a glance. Note that
+disabled endpoints never appear in that list.
 
 ---
 
