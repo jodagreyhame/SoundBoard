@@ -795,6 +795,14 @@ func (a *App) InstallRouting() {
 		return
 	}
 	go func() {
+		// Re-detect BEFORE choosing install-vs-engage. The cached status is written
+		// at process start and, without this, nowhere else — so the branch was
+		// picked from state that could predate an install earlier in this session,
+		// the user enabling a disabled endpoint in Sound settings, or a transient
+		// enumeration failure during login autostart. Each of those ran the elevated
+		// installer — and raised a UAC prompt — on a machine whose cable was already
+		// there, which is the reinstall loop users actually hit.
+		b.redetect()
 		if b.setup.CanEngage() && !b.setup.Engaged() {
 			// These messages describe only what THIS process did to the Windows
 			// default recording device. They must never claim anything about
@@ -820,8 +828,19 @@ func (a *App) InstallRouting() {
 			a.emitRoutingStatus(b.setup.snapshot())
 			return
 		}
-		a.emitInstallProgress("VB-CABLE installed. Windows usually needs a full restart before the new device appears — restart Windows, then launch SoundBoard again to engage routing.", true, "")
-		a.emitRoutingStatus(b.setup.snapshot())
+		// VERIFY, do not assume. The installer exiting 0 is necessary but not
+		// sufficient: the driver may need a reboot before Windows publishes the
+		// endpoints, and endpoints can exist yet be DISABLED (invisible to every
+		// enumeration path we have). Re-detect and let the endpoints themselves
+		// decide the message, so we never again report "installed" for a machine
+		// that will still say "absent" on the next launch — the reinstall loop.
+		st := b.redetect()
+		if st.CanEngage {
+			a.emitInstallProgress("VB-CABLE installed and detected — engage routing to point your default mic at it.", true, "")
+		} else {
+			a.emitInstallProgress("The VB-CABLE installer finished, but Windows has not published the CABLE devices yet. Restart Windows, then launch SoundBoard again.\n\nIf it still says VB-CABLE is missing after that restart, do NOT reinstall — it will not help. Open Windows Sound settings (mmsys.cpl), right-click inside the Playback and Recording tabs and tick \"Show Disabled Devices\": if CABLE Input / CABLE Output appear greyed out, enable them.", true, "")
+		}
+		a.emitRoutingStatus(st)
 	}()
 }
 
@@ -831,7 +850,23 @@ func (a *App) GetRoutingStatus() RoutingStatus {
 	if b := a.getBackend(); b != nil {
 		return b.setup.snapshot()
 	}
-	return RoutingStatus{State: "absent", Detail: "Backend not initialized.", CanEngage: false}
+	return RoutingStatus{State: "unavailable", Detail: "Backend not initialized.", CanEngage: false}
+}
+
+// RedetectRouting re-enumerates audio devices and returns (and broadcasts) the
+// refreshed routing status. It exists so "VB-CABLE not detected" is RECOVERABLE
+// within a session: the status used to be read once at startup and never again,
+// so enabling a disabled endpoint in Sound settings, or a one-off enumeration
+// failure during login autostart, left the app insisting on an install until the
+// user restarted it — and reinstalling is exactly what cannot fix either case.
+func (a *App) RedetectRouting() RoutingStatus {
+	b := a.getBackend()
+	if b == nil {
+		return RoutingStatus{State: "unavailable", Detail: "Backend not initialized.", CanEngage: false}
+	}
+	st := b.redetect()
+	a.emitRoutingStatus(st)
+	return st
 }
 
 // ---------------------------------------------------------------------------

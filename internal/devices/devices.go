@@ -27,12 +27,29 @@ type Device struct {
 	IsDefault bool
 }
 
-// Exact / contains match strings for the VB-CABLE endpoints.
+// Exact / contains match strings for the VB-CABLE endpoints. Matching is
+// case-INSENSITIVE, which also makes this agree with the engage-time endpoint
+// lookup in internal/winaudio (winaudio.FindCaptureEndpointID lowercases both
+// sides); the two disagreeing meant a name could satisfy one and not the other.
 const (
 	cableInputExact     = "CABLE Input (VB-Audio Virtual Cable)"
 	cableInputContains  = "CABLE Input"
 	cableOutputExact    = "CABLE Output (VB-Audio Virtual Cable)"
 	cableOutputContains = "CABLE Output"
+
+	// cableAdapter is the adapter half of a VB-CABLE endpoint's friendly name.
+	// Windows lets a user rename an endpoint (Sound settings -> Properties), which
+	// rewrites only the leading half — "<NewName> (VB-Audio Virtual Cable)" — and
+	// that rename persists across reboots AND driver reinstalls. A renamed endpoint
+	// is invisible to the needles above but still carries this, so it is used as a
+	// LAST-RESORT match: without it a rename is indistinguishable from "not
+	// installed", which puts the user in a reinstall loop that can never succeed.
+	cableAdapter = "VB-Audio Virtual Cable"
+
+	// cableMultiChannel marks the 16-channel playback variant ("CABLE In 16ch"),
+	// which shares the adapter name. It is de-prioritised in the last-resort match
+	// so a renamed plain CABLE Input wins over it.
+	cableMultiChannel = "16ch"
 )
 
 // Enumerate lists all playback and capture devices for the given context.
@@ -64,31 +81,64 @@ func toDevices(infos []malgo.DeviceInfo) []Device {
 
 // FindCableInput returns the VB-CABLE playback endpoint we play into.
 // Prefers the exact "CABLE Input (VB-Audio Virtual Cable)" name, else any
-// device whose name Contains "CABLE Input".
+// device whose name contains "CABLE Input", else a renamed VB-CABLE endpoint.
 func FindCableInput(playback []Device) (Device, bool) {
-	return findExactThenContains(playback, cableInputExact, cableInputContains)
+	return findCableEndpoint(playback, cableInputExact, cableInputContains)
 }
 
 // FindCableOutput returns the VB-CABLE capture endpoint Discord listens to.
-// Used only to warn the user if it is absent.
 func FindCableOutput(capture []Device) (Device, bool) {
-	return findExactThenContains(capture, cableOutputExact, cableOutputContains)
+	return findCableEndpoint(capture, cableOutputExact, cableOutputContains)
+}
+
+// findCableEndpoint resolves a VB-CABLE endpoint in three passes: exact friendly
+// name, then the "CABLE Input"/"CABLE Output" needle, then — only if both miss —
+// any device carrying the VB-CABLE adapter name, which is how a user-renamed
+// endpoint is still recognised. All comparisons are case-insensitive.
+func findCableEndpoint(list []Device, exact, contains string) (Device, bool) {
+	if d, ok := findExactThenContains(list, exact, contains); ok {
+		return d, true
+	}
+	return findAdapter(list)
 }
 
 // findExactThenContains returns the first device whose Name equals exact; if
-// none match, the first whose Name contains the substring.
+// none match, the first whose Name contains the substring. Case-insensitive.
 func findExactThenContains(list []Device, exact, contains string) (Device, bool) {
 	for _, d := range list {
-		if d.Name == exact {
+		if strings.EqualFold(d.Name, exact) {
 			return d, true
 		}
 	}
+	needle := strings.ToLower(contains)
 	for _, d := range list {
-		if strings.Contains(d.Name, contains) {
+		if strings.Contains(strings.ToLower(d.Name), needle) {
 			return d, true
 		}
 	}
 	return Device{}, false
+}
+
+// findAdapter returns a device whose name carries the VB-CABLE adapter string,
+// preferring the plain endpoint over the 16-channel variant that shares it. It
+// runs only after the named matches miss, so on a normal install it never fires.
+func findAdapter(list []Device) (Device, bool) {
+	adapter := strings.ToLower(cableAdapter)
+	var fallback Device
+	var haveFallback bool
+	for _, d := range list {
+		name := strings.ToLower(d.Name)
+		if !strings.Contains(name, adapter) {
+			continue
+		}
+		if !strings.Contains(name, cableMultiChannel) {
+			return d, true
+		}
+		if !haveFallback {
+			fallback, haveFallback = d, true
+		}
+	}
+	return fallback, haveFallback
 }
 
 // FindByName returns the device with an exact matching Name, falling back to

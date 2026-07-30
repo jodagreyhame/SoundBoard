@@ -100,7 +100,7 @@ func newBackend() *Backend {
 	)
 	if err != nil {
 		log.Printf("init audio context: %v (running without audio routing)", err)
-		b.setup = &routingController{}
+		b.setup = &routingController{audioUnavailable: true}
 		b.engine = audio.NewEngine(nil, lib)
 		b.hotkeys = hotkeys.New()
 		b.hotkeys.Run()
@@ -109,15 +109,18 @@ func newBackend() *Backend {
 	b.ctx = ctx
 
 	playback, capture, err := devices.Enumerate(ctx)
-	if err != nil {
+	enumFailed := err != nil
+	if enumFailed {
 		log.Printf("enumerate devices: %v (running without audio routing)", err)
 		playback, capture = nil, nil
 	}
 	status := setup.Detect(playback, capture)
-	if !status.CableInputPresent {
+	if !enumFailed && !status.CableInputPresent {
 		log.Printf("VB-CABLE not detected. Install from %s", setup.DownloadURL())
 	}
-	b.setup = &routingController{status: status}
+	// A failed enumeration says nothing about whether the cable exists; do not let
+	// it masquerade as "VB-CABLE absent" and push the user at the installer.
+	b.setup = &routingController{status: status, audioUnavailable: enumFailed}
 
 	// Auto-engage routing at startup when the cable is present so Discord needs
 	// ZERO changes immediately. Engaging hijacks the default capture endpoint, so
@@ -292,6 +295,13 @@ type routingController struct {
 	status  setup.Status
 	engaged bool
 	restore func() // reverts the default mic; nil until Engage succeeds
+
+	// audioUnavailable means the audio backend itself failed (malgo context init
+	// or device enumeration), so we do not KNOW whether VB-CABLE is present. It is
+	// reported as its own state rather than collapsing to "absent": telling a user
+	// with a working cable to install it sends them into a reinstall loop that
+	// cannot fix an audio-stack problem.
+	audioUnavailable bool
 }
 
 // snapshot maps the live routing state to the binding contract's RoutingStatus.
@@ -305,7 +315,14 @@ func (r *routingController) snapshot() RoutingStatus {
 	// means it was already pointing at the cable and we left it alone.
 	changedByUs := r.restore != nil
 	st := r.status
+	audioDown := r.audioUnavailable
 	r.mu.Unlock()
+
+	// An audio-stack failure is NOT evidence that VB-CABLE is missing, so it gets
+	// its own state and never offers the installer.
+	if audioDown {
+		return RoutingStatus{State: "unavailable", Detail: "SoundBoard could not start Windows audio, so it cannot tell whether VB-CABLE is installed. Re-check after making sure no other app has exclusive control of your audio devices.", CanEngage: false}
+	}
 
 	// These strings describe only what this process did or can observe locally.
 	//
@@ -365,12 +382,34 @@ func (r *routingController) Engage() error {
 }
 
 // Redetect re-enumerates the cable endpoints (e.g. after an install completes)
-// and updates the cached status so snapshot() reflects the new reality.
+// and updates the cached status so snapshot() reflects the new reality. A
+// successful re-enumeration also clears audioUnavailable, since it proves the
+// audio backend is answering again.
 func (r *routingController) Redetect(playback, capture []devices.Device) {
 	status := setup.Detect(playback, capture)
 	r.mu.Lock()
 	r.status = status
+	r.audioUnavailable = false
 	r.mu.Unlock()
+}
+
+// redetect re-enumerates audio devices and refreshes the cached routing status,
+// returning the fresh snapshot. Without this the status cached at process start
+// is the ONLY one a session ever has: "absent" was terminal for the run, so a
+// cable that appeared mid-session (the whole point of installing one) stayed
+// invisible until the user restarted the app, and a single transient enumeration
+// failure at boot poisoned the entire session into "install VB-CABLE".
+func (b *Backend) redetect() RoutingStatus {
+	if b.ctx == nil {
+		return b.setup.snapshot()
+	}
+	playback, capture, err := devices.Enumerate(b.ctx)
+	if err != nil {
+		log.Printf("redetect: enumerate devices: %v", err)
+		return b.setup.snapshot()
+	}
+	b.setup.Redetect(playback, capture)
+	return b.setup.snapshot()
 }
 
 // alreadyDefaultRouted reports whether the Windows default capture endpoint is

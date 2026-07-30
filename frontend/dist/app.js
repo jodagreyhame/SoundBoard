@@ -284,6 +284,11 @@
     var r = S.snap.routing || {};
     var engaged = r.state === "engaged";
     var present = r.state === "present";
+    // "unavailable" = the audio backend failed, so cable presence is UNKNOWN. It
+    // must never read as "VB-CABLE missing": that pushes the user at an installer
+    // which cannot fix an audio-stack problem.
+    var unavailable = r.state === "unavailable";
+    var engageable = !!r.canEngage;
 
     var pill = $("conn-pill"), dot = $("conn-dot"), lab = $("conn-label");
     pill.style.background = engaged ? "var(--ok-bg)" : "var(--error-bg, rgba(240,80,80,.14))";
@@ -291,7 +296,9 @@
     dot.style.boxShadow   = engaged ? "0 0 8px var(--success)" : "0 0 8px var(--error)";
     lab.style.color       = engaged ? "var(--success)" : "var(--error)";
     lab.textContent       = engaged ? "Mic → CABLE Output"
-                          : present ? "Routing not engaged"
+                          : unavailable ? "Audio unavailable"
+                          : engageable ? "Routing not engaged"
+                          : present ? "VB-CABLE incomplete"
                                     : "VB-CABLE missing";
 
     // Only actionable states are clickable.
@@ -310,16 +317,33 @@
     if (!S.connOpen) return;
 
     var r = S.snap.routing || {};
-    var present = r.state === "present";
-    $("conn-pop-title").textContent = present ? "Routing not engaged" : "VB-CABLE is not installed";
+    var engageable = !!r.canEngage;
+    var unavailable = r.state === "unavailable";
+    var partial = r.state === "present" && !engageable;
+
+    $("conn-pop-title").textContent = unavailable ? "Windows audio unavailable"
+                                    : engageable ? "Routing not engaged"
+                                    : partial ? "VB-CABLE is incomplete"
+                                              : "VB-CABLE is not installed";
     // r.detail comes from the backend and describes only local state.
-    $("conn-pop-body").textContent = r.detail || (present
+    $("conn-pop-body").textContent = r.detail || (engageable
       ? "VB-CABLE is installed but your default microphone does not point at it."
       : "SoundBoard needs the VB-CABLE virtual audio device to send clips into your microphone.");
 
     var btn = $("conn-pop-btn");
-    btn.textContent = present ? "Engage routing" : "Install VB-CABLE";
-    btn.onclick = function () { S.connOpen = false; renderConnPop(); onInstallRouting(); };
+    // The button follows canEngage, NOT state. App.InstallRouting's install-vs-
+    // engage gate is keyed on canEngage, so keying the label on state alone
+    // offered "Engage routing" for a partial install, then ran the ELEVATED
+    // INSTALLER underneath an "Engaging routing" dialog and finished on a bogus
+    // "Routing engaged" card for something that engaged nothing.
+    btn.textContent = unavailable ? "Re-check audio" : engageable ? "Engage routing" : "Install VB-CABLE";
+    btn.onclick = function () {
+      S.connOpen = false;
+      renderConnPop();
+      // Nothing to install when the audio stack is the problem — just re-look.
+      if (unavailable) { call("RedetectRouting"); return; }
+      onInstallRouting();
+    };
   }
 
   // InstallRouting (install OR engage as appropriate). Open the matching
@@ -327,7 +351,9 @@
   // + routingStatus events (or the demo flow advances it).
   function onInstallRouting() {
     var r = S.snap.routing || {};
-    openDialog(r.state === "present" ? "progressEngage" : "progressInstall");
+    // Mirror the backend's own gate (App.InstallRouting keys on canEngage) so the
+    // optimistic dialog cannot disagree with the branch actually taken.
+    openDialog(r.canEngage ? "progressEngage" : "progressInstall");
     call("InstallRouting");
   }
 

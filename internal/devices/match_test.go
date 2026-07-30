@@ -144,3 +144,82 @@ func TestDefaultMic(t *testing.T) {
 		t.Fatal("expected ok=false on empty list")
 	}
 }
+
+// TestFindCableCaseInsensitive covers the case-insensitive matching that brings
+// devices.go into agreement with winaudio.FindCaptureEndpointID, which has
+// always lowercased both sides. While the two disagreed, a friendly name could
+// satisfy the engage path and not the detect path.
+func TestFindCableCaseInsensitive(t *testing.T) {
+	in, ok := FindCableInput([]Device{dev("cable input (vb-audio virtual cable)", false)})
+	if !ok || in.Name != "cable input (vb-audio virtual cable)" {
+		t.Fatalf("lowercase exact name not matched: %q ok=%v", in.Name, ok)
+	}
+	out, ok := FindCableOutput([]Device{dev("CaBlE OuTpUt (Whatever)", false)})
+	if !ok || out.Name != "CaBlE OuTpUt (Whatever)" {
+		t.Fatalf("mixed-case contains not matched: %q ok=%v", out.Name, ok)
+	}
+}
+
+// TestFindCableRenamedEndpoint covers the last-resort adapter match. Windows lets
+// a user rename an endpoint, which rewrites only the leading half of the friendly
+// name and persists across reboots AND driver reinstalls — so without this a
+// renamed cable is indistinguishable from "not installed", and the app sends the
+// user into a reinstall loop that can never fix it.
+func TestFindCableRenamedEndpoint(t *testing.T) {
+	tests := []struct {
+		name   string
+		list   []Device
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "renamed input found via adapter name",
+			list:   []Device{dev("Speakers (Realtek)", false), dev("Discord Feed (VB-Audio Virtual Cable)", false)},
+			want:   "Discord Feed (VB-Audio Virtual Cable)",
+			wantOK: true,
+		},
+		{
+			name: "plain endpoint preferred over the 16ch variant",
+			list: []Device{
+				dev("CABLE In 16ch (VB-Audio Virtual Cable)", false),
+				dev("Renamed Board (VB-Audio Virtual Cable)", false),
+			},
+			want:   "Renamed Board (VB-Audio Virtual Cable)",
+			wantOK: true,
+		},
+		{
+			name:   "16ch accepted when it is the only VB-Audio device",
+			list:   []Device{dev("CABLE In 16ch (VB-Audio Virtual Cable)", false)},
+			want:   "CABLE In 16ch (VB-Audio Virtual Cable)",
+			wantOK: true,
+		},
+		{
+			name:   "named match still wins over adapter fallback",
+			list:   []Device{dev("Renamed (VB-Audio Virtual Cable)", false), dev("CABLE Input (VB-Audio Virtual Cable)", false)},
+			want:   "CABLE Input (VB-Audio Virtual Cable)",
+			wantOK: true,
+		},
+		{
+			name:   "unrelated devices never match",
+			list:   []Device{dev("Speakers (Realtek)", false), dev("Microphone (Logitech)", false)},
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := FindCableInput(tc.list)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && got.Name != tc.want {
+				t.Fatalf("name = %q, want %q", got.Name, tc.want)
+			}
+		})
+	}
+
+	// The same fallback must work for the capture side.
+	out, ok := FindCableOutput([]Device{dev("Board Return (VB-Audio Virtual Cable)", false)})
+	if !ok || out.Name != "Board Return (VB-Audio Virtual Cable)" {
+		t.Fatalf("renamed output not matched: %q ok=%v", out.Name, ok)
+	}
+}
