@@ -46,9 +46,11 @@ const (
 	// installed", which puts the user in a reinstall loop that can never succeed.
 	cableAdapter = "VB-Audio Virtual Cable"
 
-	// cableMultiChannel marks the 16-channel playback variant ("CABLE In 16ch"),
-	// which shares the adapter name. It is de-prioritised in the last-resort match
-	// so a renamed plain CABLE Input wins over it.
+	// cableMultiChannel marks the 16-channel playback variant, which shares the
+	// adapter name. It is de-prioritised in the last-resort match so a renamed
+	// plain CABLE Input wins over it. Driver versions differ on spacing — "CABLE
+	// In 16ch" and "CABLE In 16 Ch" both ship (a real user's machine showed the
+	// spaced form) — so names are compared with spaces stripped.
 	cableMultiChannel = "16ch"
 )
 
@@ -131,7 +133,7 @@ func findAdapter(list []Device) (Device, bool) {
 		if !strings.Contains(name, adapter) {
 			continue
 		}
-		if !strings.Contains(name, cableMultiChannel) {
+		if !isMultiChannelName(name) {
 			return d, true
 		}
 		if !haveFallback {
@@ -139,6 +141,13 @@ func findAdapter(list []Device) (Device, bool) {
 		}
 	}
 	return fallback, haveFallback
+}
+
+// isMultiChannelName reports whether a lowercased device name is the cable's
+// 16-channel variant, tolerating the spacing differences between driver
+// versions ("16ch" vs "16 Ch") by stripping spaces before matching.
+func isMultiChannelName(lowerName string) bool {
+	return strings.Contains(strings.ReplaceAll(lowerName, " ", ""), cableMultiChannel)
 }
 
 // FindByName returns the device with an exact matching Name, falling back to

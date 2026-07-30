@@ -223,3 +223,65 @@ func TestFindCableRenamedEndpoint(t *testing.T) {
 		t.Fatalf("renamed output not matched: %q ok=%v", out.Name, ok)
 	}
 }
+
+// TestFindCableReporterMachine reproduces the first real bug report byte for
+// byte. The reporter's VB-CABLE playback endpoint is named "Speakers (VB-Audio
+// Virtual Cable)" — not "CABLE Input" — and their driver names the 16-channel
+// variant "CABLE In 16 Ch" (spaced), while newer packs ship "CABLE In 16ch".
+// The old named-needle matcher saw no cable at all, reported "absent", and sent
+// the reporter into an install loop that a reinstall could never fix (a
+// reinstall does not rename endpoints). Device names and order are exactly as
+// enumerated from their Windows 11 Sound settings screenshots.
+func TestFindCableReporterMachine(t *testing.T) {
+	playback := []Device{
+		dev("U32J59x (NVIDIA High Definition Audio)", false),
+		dev("Speakers (VB-Audio Virtual Cable)", false),
+		dev("Headphones (Arctis Nova 7)", true),
+		dev("CABLE In 16 Ch (VB-Audio Virtual Cable)", false),
+		dev("U32J59x (NVIDIA High Definition Audio)", false),
+		dev("Speakers (Realtek(R) Audio)", false),
+		dev("U32J59x (NVIDIA High Definition Audio)", false),
+	}
+	capture := []Device{
+		dev("CABLE Output (VB-Audio Virtual Cable)", false),
+		dev("Microphone (HD Pro Webcam C920)", false),
+		dev("Microphone (Arctis Nova 7)", true),
+	}
+
+	in, ok := FindCableInput(playback)
+	if !ok {
+		t.Fatal("renamed cable input not found — this is the reporter's install loop")
+	}
+	// The renamed plain endpoint must win over the 16-channel variant even
+	// though the spaced "16 Ch" form does not literally contain "16ch".
+	if in.Name != "Speakers (VB-Audio Virtual Cable)" {
+		t.Fatalf("picked %q, want the renamed plain endpoint", in.Name)
+	}
+
+	out, ok := FindCableOutput(capture)
+	if !ok || out.Name != "CABLE Output (VB-Audio Virtual Cable)" {
+		t.Fatalf("cable output: %q ok=%v", out.Name, ok)
+	}
+
+	// Enumeration order is not guaranteed: when the spaced "CABLE In 16 Ch"
+	// comes FIRST, the renamed plain endpoint must still win — this is the case
+	// the space-stripping in isMultiChannelName exists for (a literal "16ch"
+	// needle does not match "16 Ch", which would promote the variant).
+	reordered, ok := FindCableInput([]Device{
+		dev("CABLE In 16 Ch (VB-Audio Virtual Cable)", false),
+		dev("Speakers (VB-Audio Virtual Cable)", false),
+	})
+	if !ok || reordered.Name != "Speakers (VB-Audio Virtual Cable)" {
+		t.Fatalf("16 Ch enumerated first: picked %q, want the renamed plain endpoint", reordered.Name)
+	}
+
+	// The 16 Ch variant must still be accepted when it is the only cable
+	// playback endpoint (e.g. the plain one is disabled).
+	only16, ok := FindCableInput([]Device{
+		dev("Headphones (Arctis Nova 7)", true),
+		dev("CABLE In 16 Ch (VB-Audio Virtual Cable)", false),
+	})
+	if !ok || only16.Name != "CABLE In 16 Ch (VB-Audio Virtual Cable)" {
+		t.Fatalf("16 Ch-only fallback: %q ok=%v", only16.Name, ok)
+	}
+}
