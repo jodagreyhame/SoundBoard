@@ -791,7 +791,7 @@ func (a *App) SetPTTHotkey(combo string) {
 func (a *App) InstallRouting() {
 	b := a.getBackend()
 	if b == nil {
-		a.emitInstallProgress("Backend not initialized.", true, "backend unavailable")
+		a.emitInstallProgress("Backend not initialized.", true, "backend unavailable", "")
 		return
 	}
 	go func() {
@@ -804,17 +804,28 @@ func (a *App) InstallRouting() {
 		// there, which is the reinstall loop users actually hit.
 		b.redetect()
 		if b.setup.CanEngage() && !b.setup.Engaged() {
+			// The engine is only wired into CABLE Input when the cable existed at
+			// startup (newBackend configures and starts it exactly once). If the
+			// cable appeared mid-session — the redetect above just found it —
+			// engaging now would hijack the Windows default mic while the board
+			// feeds NOTHING into the cable: Discord would hear pure silence,
+			// presented as success. A fresh process wires everything; say so.
+			if !b.audioRunning {
+				a.emitInstallProgress("VB-CABLE is installed and detected, but SoundBoard started before it existed, so the soundboard is not wired into it yet. Restart SoundBoard to finish setup.", true, "", "restart")
+				a.emitRoutingStatus(b.setup.snapshot())
+				return
+			}
 			// These messages describe only what THIS process did to the Windows
 			// default recording device. They must never claim anything about
 			// Discord: its input-device selection and noise-suppression settings
 			// are not readable from here.
-			a.emitInstallProgress("Engaging routing — pointing your default mic at CABLE Output…", false, "")
+			a.emitInstallProgress("Engaging routing — pointing your default mic at CABLE Output…", false, "", "")
 			if err := b.setup.Engage(); err != nil {
-				a.emitInstallProgress("Could not engage routing.", true, err.Error())
+				a.emitInstallProgress("Could not engage routing.", true, err.Error(), "")
 				a.emitRoutingStatus(b.setup.snapshot())
 				return
 			}
-			a.emitInstallProgress("Routing engaged — your default mic now points at CABLE Output.", true, "")
+			a.emitInstallProgress("Routing engaged — your default mic now points at CABLE Output.", true, "", "engaged")
 			a.emitRoutingStatus(b.setup.snapshot())
 			return
 		}
@@ -822,9 +833,9 @@ func (a *App) InstallRouting() {
 		// Cable absent (or output missing): run the elevated installer. It blocks
 		// until the installer process exits; a reboot may still be needed before
 		// the endpoints appear, which the final message surfaces.
-		a.emitInstallProgress("Downloading and installing VB-CABLE (approve the Windows prompt)…", false, "")
+		a.emitInstallProgress("Downloading and installing VB-CABLE (approve the Windows prompt)…", false, "", "")
 		if err := b.setup.Install(); err != nil {
-			a.emitInstallProgress("VB-CABLE install did not complete.", true, err.Error())
+			a.emitInstallProgress("VB-CABLE install did not complete.", true, err.Error(), "")
 			a.emitRoutingStatus(b.setup.snapshot())
 			return
 		}
@@ -836,14 +847,17 @@ func (a *App) InstallRouting() {
 		// that will still say "absent" on the next launch — the reinstall loop.
 		st := b.redetect()
 		if st.CanEngage {
-			a.emitInstallProgress("VB-CABLE installed and detected — engage routing to point your default mic at it.", true, "")
+			// Detected — but this process booted without the cable, so its engine is
+			// not wired into CABLE Input (see the !audioRunning guard above). The
+			// honest next step is an app restart, never "engage".
+			a.emitInstallProgress("VB-CABLE installed and detected. Restart SoundBoard to finish wiring the soundboard into it.", true, "", "restart")
 		} else {
 			// Name the two traps that make a "restart" not count and make reinstalling
 			// futile, because the app cannot see either one: Fast Startup turns Shut
 			// Down into a hibernate that never re-initialises the driver, and a
 			// DISABLED endpoint is invisible to every enumeration path we have while
 			// surviving both reboots and reinstalls.
-			a.emitInstallProgress("The VB-CABLE installer finished, but Windows has not published the CABLE devices yet.\n\nUse Start ▸ Power ▸ RESTART, not Shut down — with Fast Startup enabled a shutdown does not fully reload drivers. Then launch SoundBoard again.\n\nIf it still says VB-CABLE is missing after that restart, do NOT reinstall — it cannot help. Open Windows Sound settings (mmsys.cpl), right-click inside the Playback and Recording tabs and tick \"Show Disabled Devices\": if CABLE Input / CABLE Output appear greyed out, enable them.", true, "")
+			a.emitInstallProgress("The VB-CABLE installer finished, but Windows has not published the CABLE devices yet.\n\nUse Start ▸ Power ▸ RESTART, not Shut down — with Fast Startup enabled a shutdown does not fully reload drivers. Then launch SoundBoard again.\n\nIf it still says VB-CABLE is missing after that restart, do NOT reinstall — it cannot help. Open Windows Sound settings (mmsys.cpl), right-click inside the Playback and Recording tabs and tick \"Show Disabled Devices\": if CABLE Input / CABLE Output appear greyed out, enable them.", true, "", "reboot")
 		}
 		a.emitRoutingStatus(st)
 	}()
@@ -1162,10 +1176,16 @@ func (a *App) emitRoutingStatus(s RoutingStatus) {
 }
 
 // emitInstallProgress pushes an install/engage progress update.
-func (a *App) emitInstallProgress(msg string, done bool, errMsg string) {
+// emitInstallProgress drives the install/engage dialog. kind discriminates the
+// DONE outcome for the frontend, which must choose a card without guessing from
+// prose: "engaged" (routing live now), "restart" (cable detected but this
+// process cannot use it — an app restart finishes), "reboot" (endpoints not
+// published — Windows restart or Sound-settings check needed). Empty for
+// non-terminal progress and for error outcomes (err carries those).
+func (a *App) emitInstallProgress(msg string, done bool, errMsg, kind string) {
 	if ctx := a.context(); ctx != nil {
 		runtime.EventsEmit(ctx, "installProgress", map[string]any{
-			"msg": msg, "done": done, "err": errMsg,
+			"msg": msg, "done": done, "err": errMsg, "kind": kind,
 		})
 	}
 }

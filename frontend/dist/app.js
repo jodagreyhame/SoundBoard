@@ -69,7 +69,12 @@
   var FALLBACK = {
     version: "",
     theme: "dark",
-    routing: { state: "absent", detail: "VB-CABLE not detected — install it to route the soundboard into your mic.", canEngage: false },
+    // FALLBACK is ingested when GetState itself fails (backend not initialized,
+    // binding error). That says nothing about whether VB-CABLE exists, so the
+    // routing state is "unavailable", NOT "absent": "absent" raises the blocking
+    // first-run consent gate, and raising it on a binding failure demanded a
+    // driver install from users whose cable was working the whole time.
+    routing: { state: "unavailable", detail: "SoundBoard could not read its backend state. Try the Re-check button, or restart the app.", canEngage: false },
     categories: [],
     clips: [], favorites: [],
     volumes: { mic: 1, master: 1, monitor: 1 }, perClip: {},
@@ -94,6 +99,8 @@
     playing: [],              // [{id,name,chip,seen,at}] now-playing chips, reconciled against the "nowPlaying" event
     npDismissed: {},          // clipID -> ms deadline; suppresses a chip we just ✕'d until the engine agrees
     selected: null,           // selected clipID (per-clip mixer row)
+    installMsg: "",           // backend's verified post-install verdict (installProgress msg)
+    installKind: "",          // its done kind: "restart" (app restart finishes) | "reboot"
     vol: { mic: 100, master: 100, monitor: 100 }, // percent (0..200 in the audio panel)
     clipGain: 100,
     micMode: "vad",
@@ -274,7 +281,8 @@
   // the app to narrate a state it cannot actually observe, and it spent that
   // space asserting things about Discord that are not knowable from here.
   //
-  // routing.state: "absent" (no cable) | "present" (cable, not engaged) | "engaged".
+  // routing.state: "absent" (no cable) | "present" (cable, not engaged) |
+  // "engaged" | "unavailable" (audio backend failed — cable presence unknown).
   //
   // Healthy  -> green badge, not interactive. It reports a fact and asks nothing.
   // Problem  -> RED, and becomes a button. Clicking opens a popup that explains
@@ -1054,16 +1062,22 @@
         "soundboard is mixed into it. Point Discord at that same device and apply the " +
         "settings listed under Mic & Audio — SoundBoard cannot check them for you.";
       btns = [{ label: "Nice", kind: "primary", on: closeDialog }];
-    } else if (d === "installSuccess") {
-      title = "VB-CABLE installed";
-      body = "Installation complete. Windows usually needs a FULL RESTART before the new " +
-        "CABLE Output device appears — restart Windows when convenient, then launch " +
-        "SoundBoard again. If the device is already there, restarting just SoundBoard is " +
-        "enough to pick it up.";
-      btns = [
-        { label: "Later", kind: "secondary", on: closeDialog },
-        { label: "Restart app", kind: "primary", on: restartApp }
-      ];
+    } else if (d === "installDone") {
+      // The body is the backend's VERIFIED post-install verdict, stored from the
+      // installProgress event — never canned copy. S.installKind picks the card:
+      // "restart" = endpoints detected, an app restart finishes the wiring;
+      // "reboot" = endpoints not published, Windows restart / Sound-settings
+      // check needed, and another install attempt cannot help (so no button
+      // offers one).
+      var needsAppRestart = S.installKind === "restart";
+      title = needsAppRestart ? "VB-CABLE ready — restart SoundBoard" : "One more step";
+      body = S.installMsg || "";
+      btns = needsAppRestart
+        ? [
+            { label: "Later", kind: "secondary", on: closeDialog },
+            { label: "Restart app", kind: "primary", on: restartApp }
+          ]
+        : [{ label: "OK", kind: "primary", on: closeDialog }];
     }
 
     show($("dialog-spinner"), spinner);
@@ -1528,9 +1542,12 @@
       if (!status) return;
       S.snap.routing = status;
       renderStatus();
+      // If routing actually became engaged while a progress dialog is open, the
+      // engaged card fits regardless of which flow started it (the removed
+      // "installSuccess" card claimed a Windows restart was needed for a state
+      // that is already live).
       if (status.state === "engaged") {
-        if (S.dialog === "progressInstall") openDialog("installSuccess");
-        else if (S.dialog === "progressEngage") openDialog("engageSuccess");
+        if (S.dialog === "progressInstall" || S.dialog === "progressEngage") openDialog("engageSuccess");
       }
     });
 
@@ -1549,17 +1566,22 @@
       reconcileNowPlaying(p && p.clips ? p.clips : []);
     });
 
-    // installProgress: {msg, done, err} — drive the dialog body/outcome.
+    // installProgress: {msg, done, err, kind} — drive the dialog body/outcome.
+    // kind is the backend's explicit DONE verdict ("engaged" | "restart" |
+    // "reboot"); the outcome card is chosen from it, never guessed from which
+    // progress dialog happened to be open. The previous handler opened a canned
+    // "installSuccess" card on any done install — REPLACING the backend's
+    // verified verdict the moment it arrived, so a failed endpoint publish still
+    // read as "VB-CABLE installed" and fed the reinstall loop.
     r.EventsOn("installProgress", function (p) {
       p = p || {};
       if (p.err) { openDialog("error"); $("dialog-body").textContent = p.err; return; }
       if (S.dialog === "progressInstall" || S.dialog === "progressEngage") {
-        if (p.msg) $("dialog-body").textContent = p.msg;
+        if (p.msg) { S.installMsg = p.msg; if (!p.done) $("dialog-body").textContent = p.msg; }
         if (p.done) {
-          // Outcome is finalized by the routingStatus event; if none arrives,
-          // fall back to the install-success card after a done install.
-          if (S.dialog === "progressInstall") openDialog("installSuccess");
-          else openDialog("engageSuccess");
+          if (p.kind === "engaged") { openDialog("engageSuccess"); return; }
+          S.installKind = p.kind || "reboot";
+          openDialog("installDone");
         }
       }
     });
