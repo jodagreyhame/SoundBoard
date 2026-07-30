@@ -117,6 +117,7 @@ func newBackend() *Backend {
 	status := setup.Detect(playback, capture)
 	if !enumFailed && !status.CableInputPresent {
 		log.Printf("VB-CABLE not detected. Install from %s", setup.DownloadURL())
+		logDeviceInventory(playback, capture)
 	}
 	// A failed enumeration says nothing about whether the cable exists; do not let
 	// it masquerade as "VB-CABLE absent" and push the user at the installer.
@@ -409,7 +410,34 @@ func (b *Backend) redetect() RoutingStatus {
 		return b.setup.snapshot()
 	}
 	b.setup.Redetect(playback, capture)
-	return b.setup.snapshot()
+	st := b.setup.snapshot()
+	if !st.CanEngage {
+		log.Printf("redetect: VB-CABLE still not usable (state %q)", st.State)
+		logDeviceInventory(playback, capture)
+	}
+	return st
+}
+
+// logDeviceInventory writes the full enumerated device list to soundboard.log.
+// It runs only when the cable is missing — precisely when a remote user's log is
+// the only evidence available, and when the bare "VB-CABLE not detected" line
+// cannot distinguish a genuinely absent driver from an endpoint that was
+// renamed, disabled, or enumerated under an unexpected name.
+func logDeviceInventory(playback, capture []devices.Device) {
+	log.Printf("device inventory: %d playback, %d capture (endpoints DISABLED in Windows Sound settings do not appear here)", len(playback), len(capture))
+	for _, d := range playback {
+		log.Printf("  playback: %q%s", d.Name, defaultSuffix(d.IsDefault))
+	}
+	for _, d := range capture {
+		log.Printf("  capture : %q%s", d.Name, defaultSuffix(d.IsDefault))
+	}
+}
+
+func defaultSuffix(isDefault bool) string {
+	if isDefault {
+		return " [default]"
+	}
+	return ""
 }
 
 // alreadyDefaultRouted reports whether the Windows default capture endpoint is

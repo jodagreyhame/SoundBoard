@@ -838,7 +838,12 @@ func (a *App) InstallRouting() {
 		if st.CanEngage {
 			a.emitInstallProgress("VB-CABLE installed and detected — engage routing to point your default mic at it.", true, "")
 		} else {
-			a.emitInstallProgress("The VB-CABLE installer finished, but Windows has not published the CABLE devices yet. Restart Windows, then launch SoundBoard again.\n\nIf it still says VB-CABLE is missing after that restart, do NOT reinstall — it will not help. Open Windows Sound settings (mmsys.cpl), right-click inside the Playback and Recording tabs and tick \"Show Disabled Devices\": if CABLE Input / CABLE Output appear greyed out, enable them.", true, "")
+			// Name the two traps that make a "restart" not count and make reinstalling
+			// futile, because the app cannot see either one: Fast Startup turns Shut
+			// Down into a hibernate that never re-initialises the driver, and a
+			// DISABLED endpoint is invisible to every enumeration path we have while
+			// surviving both reboots and reinstalls.
+			a.emitInstallProgress("The VB-CABLE installer finished, but Windows has not published the CABLE devices yet.\n\nUse Start ▸ Power ▸ RESTART, not Shut down — with Fast Startup enabled a shutdown does not fully reload drivers. Then launch SoundBoard again.\n\nIf it still says VB-CABLE is missing after that restart, do NOT reinstall — it cannot help. Open Windows Sound settings (mmsys.cpl), right-click inside the Playback and Recording tabs and tick \"Show Disabled Devices\": if CABLE Input / CABLE Output appear greyed out, enable them.", true, "")
 		}
 		a.emitRoutingStatus(st)
 	}()

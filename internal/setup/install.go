@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -147,7 +148,19 @@ func installCable(ctx context.Context) error {
 	if comspec == "" {
 		comspec = `C:\Windows\System32\cmd.exe`
 	}
-	return runElevatedAndWait(ctx, comspec, `/c "`+batPath+`"`)
+	// Log the install attempt and its outcome. Until now NOTHING in this file
+	// logged: install results reached the UI only as Wails events, so a remote
+	// user's soundboard.log recorded that the cable was missing but never a single
+	// word about what the installer did — leaving no way to tell a declined
+	// driver-trust prompt from a blocked driver from a download fallback.
+	log.Printf("install: launching elevated VB-CABLE installer (%s -i -h)", exePath)
+	err = runElevatedAndWait(ctx, comspec, `/c "`+batPath+`"`)
+	if err != nil {
+		log.Printf("install: FAILED: %v", err)
+	} else {
+		log.Printf("install: installer completed successfully (endpoints may still need a Windows restart)")
+	}
+	return err
 }
 
 // downloadAny tries each URL in order and writes the first successful response
@@ -158,10 +171,20 @@ func downloadAny(ctx context.Context, urls []string, dst string) error {
 	defer cancel()
 
 	var lastErr error
-	for _, url := range urls {
+	for i, url := range urls {
 		if err := downloadOne(dctx, url, dst); err != nil {
+			log.Printf("install: download %s failed: %v", url, err)
 			lastErr = err
 			continue
+		}
+		// Which pack was used matters and must be in the log. The newest pack is
+		// WHCP-signed and installs without Windows' driver-trust prompt; the older
+		// fallback is not, so a transient CDN failure silently downgrades the user
+		// to a pack that can stall on a prompt our headless install cannot answer.
+		if i > 0 {
+			log.Printf("install: WARNING using fallback driver pack %s (the current pack was unreachable)", url)
+		} else {
+			log.Printf("install: downloaded driver pack %s", url)
 		}
 		return nil
 	}
