@@ -1,6 +1,9 @@
 package devices
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func dev(name string, def bool) Device { return Device{Name: name, IsDefault: def} }
 
@@ -283,5 +286,74 @@ func TestFindCableReporterMachine(t *testing.T) {
 	})
 	if !ok || only16.Name != "CABLE In 16 Ch (VB-Audio Virtual Cable)" {
 		t.Fatalf("16 Ch-only fallback: %q ok=%v", only16.Name, ok)
+	}
+}
+
+// utf16RawID builds a Device whose RawID holds the given string as
+// NUL-terminated UTF-16LE — the exact layout miniaudio's WASAPI backend uses
+// (the MMDevice endpoint ID copied verbatim).
+func devWithID(name, endpointID string) Device {
+	d := Device{Name: name}
+	off := 0
+	for _, r := range endpointID {
+		d.RawID[off] = byte(r)
+		d.RawID[off+1] = byte(uint16(r) >> 8)
+		off += 2
+	}
+	return d
+}
+
+// TestEndpointID covers the winaudio<->malgo ID bridge: WASAPI raw IDs decode
+// to the endpoint path, anything else (DirectSound GUIDs, empty) reads as "".
+func TestEndpointID(t *testing.T) {
+	id := "{0.0.0.00000000}.{a1b2c3d4-1111-2222-3333-444455556666}"
+	if got := devWithID("x", id).EndpointID(); got != id {
+		t.Fatalf("EndpointID = %q, want %q", got, id)
+	}
+	if got := (Device{}).EndpointID(); got != "" {
+		t.Fatalf("empty RawID decoded to %q, want \"\"", got)
+	}
+	// A non-endpoint payload (e.g. a DSound GUID read as UTF-16) must be
+	// rejected by the shape check, not returned as garbage identity.
+	if got := devWithID("x", "not-an-endpoint-path").EndpointID(); got != "" {
+		t.Fatalf("non-endpoint payload decoded to %q, want \"\"", got)
+	}
+}
+
+// TestFindCableByEndpointIDs covers identity matching: case-insensitive ID
+// match, 16ch de-prioritisation (both spacings), and no-match behaviour.
+func TestFindCableByEndpointIDs(t *testing.T) {
+	idPlain := "{0.0.0.00000000}.{aaaaaaaa-0000-0000-0000-000000000001}"
+	id16 := "{0.0.0.00000000}.{aaaaaaaa-0000-0000-0000-000000000002}"
+	list := []Device{
+		devWithID("Renamed Beyond Recognition", idPlain),
+		devWithID("CABLE In 16 Ch (VB-Audio Virtual Cable)", id16),
+	}
+
+	// Both IDs offered, 16ch enumerated in the list: plain one wins even though
+	// its name carries no cable hint at all — identity decides.
+	d, ok := FindCableByEndpointIDs(list, []string{id16, idPlain})
+	if !ok || d.Name != "Renamed Beyond Recognition" {
+		t.Fatalf("picked %q ok=%v, want the renamed plain endpoint", d.Name, ok)
+	}
+
+	// Case-insensitive ID comparison.
+	d, ok = FindCableByEndpointIDs(list, []string{strings.ToUpper(idPlain)})
+	if !ok || d.Name != "Renamed Beyond Recognition" {
+		t.Fatalf("uppercased ID not matched: %q ok=%v", d.Name, ok)
+	}
+
+	// Only the 16ch ID available -> it is still accepted.
+	d, ok = FindCableByEndpointIDs(list, []string{id16})
+	if !ok || d.Name != "CABLE In 16 Ch (VB-Audio Virtual Cable)" {
+		t.Fatalf("16ch-only: %q ok=%v", d.Name, ok)
+	}
+
+	// No IDs / unknown ID -> not found.
+	if _, ok := FindCableByEndpointIDs(list, nil); ok {
+		t.Fatal("nil ids matched")
+	}
+	if _, ok := FindCableByEndpointIDs(list, []string{"{0.0.0.00000000}.{ffffffff-0000-0000-0000-000000000000}"}); ok {
+		t.Fatal("unknown id matched")
 	}
 }

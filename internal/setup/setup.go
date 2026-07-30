@@ -57,9 +57,16 @@ type Status struct {
 	CanEngage          bool
 }
 
+// cableAdapterName is the device-interface (adapter) friendly name VB-CABLE's
+// driver INF registers for every one of its endpoints. Unlike the endpoint
+// friendly name, a user rename never touches it, so it is the cable's IDENTITY.
+const cableAdapterName = "VB-Audio Virtual Cable"
+
 // Detect inspects enumerated playback/capture devices for the VB-CABLE
-// endpoints and reports whether routing can be engaged. It also caches the
-// capture list so PreviousDefaultMic can re-resolve the user's mic by name.
+// endpoints BY NAME and reports whether routing can be engaged. It also caches
+// the capture list so PreviousDefaultMic can re-resolve the user's mic by name.
+// It is pure (no COM), so tests drive it with synthetic device lists; runtime
+// callers should prefer DetectSystem, which adds identity-based matching.
 func Detect(playback, capture []devices.Device) Status {
 	_, in := devices.FindCableInput(playback)
 	_, out := devices.FindCableOutput(capture)
@@ -73,6 +80,58 @@ func Detect(playback, capture []devices.Device) Status {
 		CableOutputPresent: out,
 		CanEngage:          in && out,
 	}
+}
+
+// DetectSystem is Detect plus IDENTITY matching: any endpoint whose Windows
+// device-interface (adapter) property is "VB-Audio Virtual Cable" counts as
+// present, whatever it is currently named. Identity can only ADD presence on
+// top of the name-based result, never subtract, so a COM failure or a non-
+// WASAPI backend (where endpoint IDs don't bridge) degrades exactly to Detect.
+// This is what makes detection rename-proof: the first real bug report was a
+// machine whose cable input had been renamed "Speakers (VB-Audio Virtual
+// Cable)", invisible to every name needle.
+func DetectSystem(playback, capture []devices.Device) Status {
+	st := Detect(playback, capture)
+	if st.CanEngage {
+		return st
+	}
+	if !st.CableInputPresent {
+		if _, ok := cableByIdentity(winaudio.ERender, playback); ok {
+			st.CableInputPresent = true
+		}
+	}
+	if !st.CableOutputPresent {
+		if _, ok := cableByIdentity(winaudio.ECapture, capture); ok {
+			st.CableOutputPresent = true
+		}
+	}
+	st.CanEngage = st.CableInputPresent && st.CableOutputPresent
+	return st
+}
+
+// ResolveCableDevice returns the malgo playback device the engine should play
+// into: the name-matched cable endpoint if any, else the endpoint identified by
+// the cable's adapter property. ok is false only when neither path finds one.
+func ResolveCableDevice(playback []devices.Device) (devices.Device, bool) {
+	if d, ok := devices.FindCableInput(playback); ok {
+		return d, true
+	}
+	return cableByIdentity(winaudio.ERender, playback)
+}
+
+// cableByIdentity maps the ACTIVE endpoints carrying the VB-CABLE adapter
+// property into the given malgo device list by endpoint ID. Best-effort: any
+// COM error reads as "not found" so callers fall back to name matching.
+func cableByIdentity(flow winaudio.EDataFlow, list []devices.Device) (devices.Device, bool) {
+	eps, err := winaudio.EndpointsByAdapter(flow, cableAdapterName)
+	if err != nil || len(eps) == 0 {
+		return devices.Device{}, false
+	}
+	ids := make([]string, 0, len(eps))
+	for _, ep := range eps {
+		ids = append(ids, ep.ID)
+	}
+	return devices.FindCableByEndpointIDs(list, ids)
 }
 
 // DownloadURL returns the official VB-CABLE driver pack download URL.
@@ -105,10 +164,18 @@ func EngageRouting() (restore func(), err error) {
 	}
 	prevName, nameErr := winaudio.DefaultCaptureName() // best-effort
 
-	// Locate the CABLE Output capture endpoint Discord will read from.
-	cableID, err := winaudio.FindCaptureEndpointID("CABLE Output")
-	if err != nil {
-		return noop, fmt.Errorf("setup: locate CABLE Output endpoint: %w", err)
+	// Locate the CABLE Output capture endpoint Discord will read from —
+	// identity first (adapter property, rename-proof), name as fallback.
+	cableID := ""
+	if eps, aerr := winaudio.EndpointsByAdapter(winaudio.ECapture, cableAdapterName); aerr == nil && len(eps) > 0 {
+		cableID = eps[0].ID
+	}
+	if cableID == "" {
+		var nerr error
+		cableID, nerr = winaudio.FindCaptureEndpointID("CABLE Output")
+		if nerr != nil {
+			return noop, fmt.Errorf("setup: locate CABLE Output endpoint: %w", nerr)
+		}
 	}
 	if cableID == prevID {
 		// Already routed (e.g. user set it manually); nothing to hijack and

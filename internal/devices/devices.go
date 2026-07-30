@@ -7,6 +7,7 @@ package devices
 
 import (
 	"strings"
+	"unicode/utf16"
 
 	"github.com/gen2brain/malgo"
 )
@@ -148,6 +149,72 @@ func findAdapter(list []Device) (Device, bool) {
 // versions ("16ch" vs "16 Ch") by stripping spaces before matching.
 func isMultiChannelName(lowerName string) bool {
 	return strings.Contains(strings.ReplaceAll(lowerName, " ", ""), cableMultiChannel)
+}
+
+// EndpointID decodes the device's raw malgo ID as a Windows endpoint ID string.
+// Under the WASAPI backend miniaudio's device ID IS the MMDevice endpoint ID
+// (a NUL-terminated UTF-16 "{0.0.x.00000000}.{guid}" path copied verbatim from
+// IMMDevice::GetId), so this is the bridge between winaudio's COM enumeration
+// and malgo's device list. Under other backends (DirectSound fallback) the raw
+// bytes are not a UTF-16 endpoint path; the shape check below rejects them by
+// returning "".
+func (d Device) EndpointID() string {
+	raw := d.RawID // copy; RawID is an array
+	buf := raw[:]
+	var out []uint16
+	for i := 0; i+1 < len(buf); i += 2 {
+		ch := uint16(buf[i]) | uint16(buf[i+1])<<8
+		if ch == 0 {
+			break
+		}
+		out = append(out, ch)
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	s := string(utf16.Decode(out))
+	// Endpoint IDs always look like "{0.0.x.00000000}.{...}". Anything else is a
+	// different backend's opaque ID misread as UTF-16 — not usable as identity.
+	if !strings.HasPrefix(s, "{0.0.") {
+		return ""
+	}
+	return s
+}
+
+// FindCableByEndpointIDs returns the device whose EndpointID matches any of the
+// given IDs (case-insensitive), preferring a device that is not the cable's
+// 16-channel variant. Used with winaudio.EndpointsByAdapter to recognise the
+// cable by IDENTITY — the driver-set adapter property — so an endpoint renamed
+// beyond all name needles is still found.
+func FindCableByEndpointIDs(list []Device, ids []string) (Device, bool) {
+	if len(ids) == 0 {
+		return Device{}, false
+	}
+	var fallback Device
+	var haveFallback bool
+	for _, d := range list {
+		eid := d.EndpointID()
+		if eid == "" {
+			continue
+		}
+		matched := false
+		for _, id := range ids {
+			if strings.EqualFold(eid, id) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if !isMultiChannelName(strings.ToLower(d.Name)) {
+			return d, true
+		}
+		if !haveFallback {
+			fallback, haveFallback = d, true
+		}
+	}
+	return fallback, haveFallback
 }
 
 // FindByName returns the device with an exact matching Name, falling back to

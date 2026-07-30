@@ -21,6 +21,8 @@ import (
 	"github.com/gen2brain/malgo"
 
 	"github.com/jodagreyhame/SoundBoard/internal/devices"
+	"github.com/jodagreyhame/SoundBoard/internal/setup"
+	"github.com/jodagreyhame/SoundBoard/internal/winaudio"
 	"github.com/jodagreyhame/SoundBoard/internal/wizard"
 )
 
@@ -68,9 +70,43 @@ func run() error {
 	}
 
 	status := wizard.Check(playback, capture)
-	fmt.Printf("CABLE Input present : %t\n", status.CableInputPresent)
-	fmt.Printf("CABLE Output present: %t\n", status.CableOutputPresent)
-	if !status.CableInputPresent {
+	fmt.Printf("CABLE Input present (by name) : %t\n", status.CableInputPresent)
+	fmt.Printf("CABLE Output present (by name): %t\n", status.CableOutputPresent)
+
+	// Identity path: endpoints carrying the VB-CABLE adapter property, mapped
+	// into the malgo lists by endpoint ID — proves the winaudio<->malgo ID
+	// bridge on this machine and shows what detection sees after a rename.
+	fmt.Println()
+	for _, side := range []struct {
+		label string
+		flow  winaudio.EDataFlow
+		list  []devices.Device
+	}{
+		{"render ", winaudio.ERender, playback},
+		{"capture", winaudio.ECapture, capture},
+	} {
+		eps, err := winaudio.EndpointsByAdapter(side.flow, "VB-Audio Virtual Cable")
+		if err != nil {
+			fmt.Printf("identity %s: winaudio error: %v\n", side.label, err)
+			continue
+		}
+		ids := make([]string, 0, len(eps))
+		for _, ep := range eps {
+			fmt.Printf("identity %s: %s  name=%q\n", side.label, ep.ID, ep.Name)
+			ids = append(ids, ep.ID)
+		}
+		if d, ok := devices.FindCableByEndpointIDs(side.list, ids); ok {
+			fmt.Printf("identity %s: -> malgo device %q (ID bridge OK)\n", side.label, d.Name)
+		} else if len(ids) > 0 {
+			fmt.Printf("identity %s: -> NO malgo device matched (ID bridge FAILED)\n", side.label)
+		} else {
+			fmt.Printf("identity %s: no endpoints with the VB-CABLE adapter property\n", side.label)
+		}
+	}
+
+	st := setup.DetectSystem(playback, capture)
+	fmt.Printf("\nDetectSystem: input=%t output=%t canEngage=%t\n", st.CableInputPresent, st.CableOutputPresent, st.CanEngage)
+	if !st.CableInputPresent {
 		fmt.Printf("\nVB-CABLE not detected. Install it from %s\n", wizard.DownloadURL())
 	}
 

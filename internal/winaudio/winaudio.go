@@ -96,6 +96,23 @@ var pkeyDeviceFriendlyName = propertyKey{
 	pid: 14,
 }
 
+// pkeyDeviceInterfaceFriendlyName is PKEY_DeviceInterface_FriendlyName
+// {026e516e-b814-414b-83cd-856d6fef4822}, PID 2 — the ADAPTER half of an
+// endpoint's identity, e.g. "VB-Audio Virtual Cable". It comes from the driver
+// INF and is NOT touched when a user renames the endpoint in Sound settings
+// (a rename rewrites only PKEY_Device_FriendlyName), which makes it the
+// rename-proof way to recognise the cable. A real user's machine had the
+// playback endpoint renamed to "Speakers (VB-Audio Virtual Cable)", which
+// defeated every friendly-name needle while this property still read
+// "VB-Audio Virtual Cable".
+var pkeyDeviceInterfaceFriendlyName = propertyKey{
+	fmtid: ole.GUID{
+		Data1: 0x026e516e, Data2: 0xb814, Data3: 0x414b,
+		Data4: [8]byte{0x83, 0xcd, 0x85, 0x6d, 0x6f, 0xef, 0x48, 0x22},
+	},
+	pid: 2,
+}
+
 // vtLPWSTR is VARTYPE VT_LPWSTR (0x001F); PKEY_Device_FriendlyName comes back as
 // an LPWSTR-typed PROPVARIANT.
 const vtLPWSTR uint16 = 0x001F
@@ -300,6 +317,19 @@ func deviceID(dev *ole.IUnknown) (string, error) {
 // deviceFriendlyName opens the device's property store and reads
 // PKEY_Device_FriendlyName.
 func deviceFriendlyName(dev *ole.IUnknown) (string, error) {
+	return devicePropertyString(dev, &pkeyDeviceFriendlyName)
+}
+
+// deviceAdapterName reads PKEY_DeviceInterface_FriendlyName — the adapter half
+// of the endpoint's identity, immune to user renames.
+func deviceAdapterName(dev *ole.IUnknown) (string, error) {
+	return devicePropertyString(dev, &pkeyDeviceInterfaceFriendlyName)
+}
+
+// devicePropertyString opens the device's property store and reads one
+// LPWSTR-typed property. A missing / non-string property yields "" and no
+// error, so callers can skip such endpoints.
+func devicePropertyString(dev *ole.IUnknown, key *propertyKey) (string, error) {
 	var store *ole.IUnknown
 	hr, _, _ := syscall.SyscallN(
 		devVtbl(dev).OpenPropertyStore,
@@ -319,11 +349,11 @@ func deviceFriendlyName(dev *ole.IUnknown) (string, error) {
 	hr, _, _ = syscall.SyscallN(
 		storeVtbl(store).GetValue,
 		uintptr(unsafe.Pointer(store)),
-		uintptr(unsafe.Pointer(&pkeyDeviceFriendlyName)),
+		uintptr(unsafe.Pointer(key)),
 		uintptr(unsafe.Pointer(&pv)),
 	)
 	if hr != 0 {
-		return "", fmt.Errorf("winaudio: GetValue(FriendlyName): %w", ole.NewError(hr))
+		return "", fmt.Errorf("winaudio: GetValue: %w", ole.NewError(hr))
 	}
 	if pv.vt != vtLPWSTR || pv.lpwstr == nil {
 		// Nothing was allocated into the union for a non-LPWSTR / null result, so
@@ -440,8 +470,10 @@ func DefaultRenderID() (string, error) {
 // DefaultCaptureName returns the friendly name of the current default recording
 // device for the console role (e.g. "Microphone (Realtek Audio)"). The setup
 // package uses this to re-resolve the user's previous default mic to a malgo
-// device by name after the cable hijacks the default endpoint, since endpoint
-// IDs and malgo device IDs are not interchangeable.
+// device by name after the cable hijacks the default endpoint. (Under the
+// WASAPI backend malgo device IDs ARE these endpoint IDs — verified live via
+// cmd/devcheck's identity section — so devices.Device.EndpointID could bridge
+// here too; the name path is kept for the DirectSound fallback backend.)
 func DefaultCaptureName() (string, error) {
 	s := enterCOM()
 	defer s.Close()
@@ -472,4 +504,87 @@ func FindRenderEndpointID(nameSubstr string) (string, error) {
 // device whose friendly name contains nameSubstr (e.g. "CABLE Output").
 func FindCaptureEndpointID(nameSubstr string) (string, error) {
 	return findEndpointID(ECapture, nameSubstr)
+}
+
+// Endpoint identifies one ACTIVE audio endpoint: its stable Windows endpoint ID
+// (the "{0.0.x.00000000}.{guid}" device path — the same string the WASAPI
+// backend uses as its device ID) and its current friendly name.
+type Endpoint struct {
+	ID   string
+	Name string
+}
+
+// EndpointsByAdapter enumerates ACTIVE endpoints of the given flow whose
+// device-interface (adapter) friendly name equals adapter, case-insensitively.
+// This matches by IDENTITY, not display name: the adapter property is written
+// by the driver INF and survives any endpoint rename, so it finds a VB-CABLE
+// endpoint that a user has renamed to something with no "CABLE" in it at all.
+// Per-endpoint property/ID read failures skip that endpoint rather than
+// failing the enumeration.
+func EndpointsByAdapter(flow EDataFlow, adapter string) ([]Endpoint, error) {
+	if strings.TrimSpace(adapter) == "" {
+		return nil, errors.New("winaudio: empty adapter name")
+	}
+
+	s := enterCOM()
+	defer s.Close()
+
+	enum, err := createEnumerator()
+	if err != nil {
+		return nil, err
+	}
+	defer enum.Release()
+
+	var coll *ole.IUnknown
+	hr, _, _ := syscall.SyscallN(
+		enumVtbl(enum).EnumAudioEndpoints,
+		uintptr(unsafe.Pointer(enum)),
+		uintptr(flow),
+		uintptr(deviceStateActive),
+		uintptr(unsafe.Pointer(&coll)),
+	)
+	if hr != 0 {
+		return nil, fmt.Errorf("winaudio: EnumAudioEndpoints: %w", ole.NewError(hr))
+	}
+	if coll == nil {
+		return nil, errors.New("winaudio: nil endpoint collection")
+	}
+	defer coll.Release()
+
+	var count uint32
+	hr, _, _ = syscall.SyscallN(
+		collVtbl(coll).GetCount,
+		uintptr(unsafe.Pointer(coll)),
+		uintptr(unsafe.Pointer(&count)),
+	)
+	if hr != 0 {
+		return nil, fmt.Errorf("winaudio: collection GetCount: %w", ole.NewError(hr))
+	}
+
+	var out []Endpoint
+	for i := uint32(0); i < count; i++ {
+		var dev *ole.IUnknown
+		hr, _, _ = syscall.SyscallN(
+			collVtbl(coll).Item,
+			uintptr(unsafe.Pointer(coll)),
+			uintptr(i),
+			uintptr(unsafe.Pointer(&dev)),
+		)
+		if hr != 0 || dev == nil {
+			continue
+		}
+		ifName, aerr := deviceAdapterName(dev)
+		if aerr != nil || !strings.EqualFold(ifName, adapter) {
+			dev.Release()
+			continue
+		}
+		id, ierr := deviceID(dev)
+		name, _ := deviceFriendlyName(dev) // best-effort; used for 16ch ranking
+		dev.Release()
+		if ierr != nil || id == "" {
+			continue
+		}
+		out = append(out, Endpoint{ID: id, Name: name})
+	}
+	return out, nil
 }

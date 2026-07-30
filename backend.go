@@ -114,7 +114,7 @@ func newBackend() *Backend {
 		log.Printf("enumerate devices: %v (running without audio routing)", err)
 		playback, capture = nil, nil
 	}
-	status := setup.Detect(playback, capture)
+	status := setup.DetectSystem(playback, capture)
 	if !enumFailed && !status.CableInputPresent {
 		log.Printf("VB-CABLE not detected. Install from %s", setup.DownloadURL())
 		logDeviceInventory(playback, capture)
@@ -387,7 +387,7 @@ func (r *routingController) Engage() error {
 // successful re-enumeration also clears audioUnavailable, since it proves the
 // audio backend is answering again.
 func (r *routingController) Redetect(playback, capture []devices.Device) {
-	status := setup.Detect(playback, capture)
+	status := setup.DetectSystem(playback, capture)
 	r.mu.Lock()
 	r.status = status
 	r.audioUnavailable = false
@@ -552,7 +552,9 @@ func resolveCableW(playback []devices.Device, name string) (devices.Device, bool
 			return d, true
 		}
 	}
-	return devices.FindCableInput(playback)
+	// Name needles first, then the cable's adapter-property identity — so the
+	// engine finds a renamed cable endpoint the same way detection does.
+	return setup.ResolveCableDevice(playback)
 }
 
 func resolveSpeakersW(playback []devices.Device) (devices.Device, bool) {
