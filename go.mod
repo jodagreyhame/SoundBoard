@@ -3,7 +3,7 @@ module github.com/jodagreyhame/SoundBoard
 go 1.25.5
 
 require (
-	github.com/gen2brain/malgo v0.11.25
+	github.com/gen2brain/malgo v0.11.26
 	github.com/getlantern/systray v1.2.2
 	github.com/go-ole/go-ole v1.3.0
 	github.com/gopxl/beep/v2 v2.1.1
